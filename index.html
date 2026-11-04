@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Projector Room</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0f0a08">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Projector Room">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
   :root { color-scheme: dark; --bg:#0f0a08; --panel:#1a1311; --line:#2d2320; --text:#f3ece6; --dim:#a99b92; --gold:#ffdd97; --red:#a43b38; --ok:#6fcf97; --bad:#ef6b5f; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -61,6 +69,11 @@
   .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:20; display:flex; align-items:flex-end; justify-content:center; }
   .modal { background:var(--panel); width:100%; max-width:560px; max-height:92vh; overflow:auto; border-radius:18px 18px 0 0; padding:1.2rem; }
   @media (min-width:700px) { .modal-bg { align-items:center; } .modal { border-radius:18px; } }
+  .modal-x { position:fixed; top:14px; right:14px; z-index:21; width:44px; height:44px; border-radius:50%; border:0; background:rgba(40,32,30,.92); color:#fff; font-size:20px; line-height:1; cursor:pointer; box-shadow:0 2px 10px rgba(0,0,0,.5); }
+  .tvpick { display:flex; gap:.5rem; overflow-x:auto; margin-bottom:.9rem; padding-bottom:.2rem; }
+  .tvpick .btn { white-space:nowrap; flex:none; }
+  .avatar-btn { background:none; border:0; padding:0; line-height:0; }
+  .avatar-btn .avatar { display:flex; align-items:center; justify-content:center; font-weight:700; line-height:1; }
   .modal h3 { margin:.1rem 0 .6rem; }
   .modal .btns { display:flex; gap:.6rem; justify-content:flex-end; margin-top:1rem; flex-wrap:wrap; }
   .cand { display:flex; gap:.8rem; padding:.6rem; border:1px solid var(--line); border-radius:10px; margin-bottom:.6rem; cursor:pointer; }
@@ -100,15 +113,19 @@ const S = {
   view: "library", seriesId: null, selecting: false, sel: new Set(),
   q: "", sort: "new", drawer: false, pending: {}, modal: null, toast: null,
   linkParam: new URLSearchParams(location.search).get("link"),
+  tv: (() => { try { return localStorage.getItem("pr_tv"); } catch (e) { return null; } })(), installEvt: null,
 };
 let auth, db, unsubs = [], toastTimer;
 
 // ---------- data helpers ----------
 const uidRef = (...p) => doc(db, "users", S.user.uid, ...p);
 const hiddenSet = () => new Set(S.overrides.hidden || []);
+// The TV whose library is shown: the one picked last, else the first linked one.
+const curTv = () => S.devices.some(d => d.id === S.tv) ? S.tv : (S.devices[0]?.id || null);
 function allItems() {
   const m = new Map();
-  for (const c of Object.values(S.chunks)) for (const it of (c.items || [])) m.set(it.id, it);
+  const tv = curTv();
+  for (const [cid, c] of Object.entries(S.chunks)) { if (tv && !cid.startsWith(tv + "_")) continue; for (const it of (c.items || [])) m.set(it.id, it); }
   return [...m.values()];
 }
 function disp(it) {
@@ -118,7 +135,7 @@ function disp(it) {
 }
 const fmtDur = ms => { if (!ms) return ""; const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}min` : `${m}min`; };
 const ep = e => `S${String(e.season ?? 0).padStart(2, "0")} E${String(e.episode ?? 0).padStart(2, "0")}`;
-const epLabel = e => (e.season != null || e.episode != null) ? ep(e) : "â€”";
+const epLabel = e => (e.season != null || e.episode != null) ? ep(e) : "—";
 function ago(ts) {
   if (!ts) return "never";
   const d = ts.toDate ? ts.toDate() : new Date(ts); const s = (Date.now() - d.getTime()) / 1000;
@@ -138,7 +155,7 @@ async function chooseMatch(id, m) { await merge(uidRef("data", "overrides"), { t
 async function resetMatch(id) { await merge(uidRef("data", "overrides"), { tmdb: { [id]: deleteField() } }); }
 
 function confirmHide(ids, then) {
-  const n = names(ids), shown = n.slice(0, 5).map(esc).join("<br>"), more = n.length > 5 ? `<br>â€¦and ${n.length - 5} more` : "";
+  const n = names(ids), shown = n.slice(0, 5).map(esc).join("<br>"), more = n.length > 5 ? `<br>…and ${n.length - 5} more` : "";
   S.modal = { type: "confirm", title: `Hide ${ids.length === 1 ? "this" : ids.length + " items"}?`,
     body: `${shown}${more}<p class="dim">They disappear from the TV but stay in Google Drive. You can bring them back any time from <b>Hidden</b>.</p>`,
     ok: "Hide", run: async () => { await hideIds(ids); S.sel.clear(); S.selecting = false; toast(`Hidden. The TV updates within a couple of minutes.`); if (then) then(); } };
@@ -176,32 +193,42 @@ async function linkTv(raw) {
     if (l.expiresAt.toDate() < new Date()) return toast("That code has expired. Press OK on the TV for a new one.");
     await setDoc(uidRef("devices", l.deviceUid), { name: l.deviceName, kind: l.kind, ownerEmail: S.user.email, linkedAt: serverTimestamp() });
     await updateDoc(ref, { claimedBy: S.user.uid });
-    S.view = "tvs"; toast(`Linked ${l.deviceName}. It shows up here within a minute.`);
+    S.view = "library"; S.drawer = false; render(); window.scrollTo(0, 0);
+    toast(`Linked ${l.deviceName}. Its films show up here within a minute.`);
   } catch (e) { toast("Couldn't link: " + (e.message || e)); }
 }
 
 // ---------- views ----------
 function topbar() {
-  return `<div class="bar"><button class="icon" data-act="drawer" aria-label="Menu">â˜°</button><h1>Projector Room</h1>
-    ${S.user.photoURL ? `<img class="avatar" src="${esc(S.user.photoURL)}" alt="">` : ""}</div>`;
+  return `<div class="bar"><button class="icon" data-act="drawer" aria-label="Menu">☰</button><h1>Projector Room</h1>
+    <button class="avatar-btn" data-act="nav" data-v="tvs" aria-label="Linked TVs">${S.user.photoURL ? `<img class="avatar" src="${esc(S.user.photoURL)}" alt="">` : `<span class="avatar">${esc((S.user.displayName || S.user.email || "?")[0].toUpperCase())}</span>`}</button></div>`;
 }
+function tvPicker() {
+  if (S.devices.length < 2 || !["library", "hidden", "attention"].includes(S.view)) return "";
+  const cur = curTv();
+  return `<div class="tvpick">${S.devices.map(d => `<button class="btn ${d.id === cur ? "gold" : "ghost"}" data-act="pick-tv" data-id="${esc(d.id)}">📺 ${esc(d.name || "TV")}</button>`).join("")}</div>`;
+}
+const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const installable = () => !standalone() && (S.installEvt || isIos());
 function drawer() {
   if (!S.drawer) return "";
   const hs = hiddenSet(), nAtt = attention().length, nHid = hs.size;
   const nav = (v, ico, label, n) => `<button class="nav ${S.view === v || (v === "library" && S.view === "series") ? "on" : ""}" data-act="nav" data-v="${v}">${ico} ${label}${n ? `<span class="n">${n}</span>` : ""}</button>`;
   return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
     <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
-    ${nav("library", "ðŸŽ¬", "Library")}${nav("hidden", "ðŸ™ˆ", "Hidden", nHid)}${nav("attention", "âš ï¸", "Needs attention", nAtt)}
-    ${nav("settings", "âš™ï¸", "TV settings")}${nav("tvs", "ðŸ“º", "Linked TVs")}
-    <button class="nav" data-act="signout">â†© Sign out</button></div>`;
+    ${nav("library", "🎬", "Library")}${nav("hidden", "🙈", "Hidden", nHid)}${nav("attention", "⚠️", "Needs attention", nAtt)}
+    ${nav("settings", "⚙️", "TV settings")}${nav("tvs", "📺", "Linked TVs")}
+    ${installable() ? `<button class="nav" data-act="install">📲 Install app</button>` : ""}
+    <button class="nav" data-act="signout">↩ Sign out</button></div>`;
 }
 function tile(it, opts = {}) {
   const d = disp(it), sel = S.sel.has(it.id);
   return `<div class="tile ${sel ? "sel" : ""} ${opts.dim ? "dim" : ""}" data-act="tile" data-id="${esc(it.id)}">
-    <div class="poster">${d.poster ? `<img loading="lazy" src="${esc(d.poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}
+    <div class="poster">${d.poster ? `<img loading="lazy" src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}
     ${it.kind === "series" ? `<span class="badge">${visibleEps(it).length} ep</span>` : ""}
-    ${S.selecting ? `<span class="check">${sel ? "âœ“" : ""}</span>` : ""}</div>
-    <div class="t">${esc(d.title)}</div><div class="y">${esc(d.year || "")}${it.kind === "series" ? " Â· series" : ""}</div></div>`;
+    ${S.selecting ? `<span class="check">${sel ? "✓" : ""}</span>` : ""}</div>
+    <div class="t">${esc(d.title)}</div><div class="y">${esc(d.year || "")}${it.kind === "series" ? " · series" : ""}</div></div>`;
 }
 function libraryItems() {
   const hs = hiddenSet(), q = S.q.trim().toLowerCase();
@@ -217,15 +244,15 @@ function gridHtml() {
 }
 function libraryView() {
   return `<div class="tools"><input type="search" id="q" placeholder="Search" value="${esc(S.q)}">
-    <select id="sort"><option value="new" ${S.sort === "new" ? "selected" : ""}>Newest</option><option value="az" ${S.sort === "az" ? "selected" : ""}>Aâ€“Z</option></select>
+    <select id="sort"><option value="new" ${S.sort === "new" ? "selected" : ""}>Newest</option><option value="az" ${S.sort === "az" ? "selected" : ""}>A–Z</option></select>
     <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select"}</button></div>
     <div id="gridbox">${gridHtml()}</div>`;
 }
 function seriesView() {
   const it = allItems().find(i => i.id === S.seriesId); if (!it) { S.view = "library"; return libraryView(); }
   const d = disp(it), hs = hiddenSet(), eps = it.episodes || [];
-  return `<button class="btn ghost" data-act="back">â† Library</button>
-    <div class="head" style="margin-top:1rem"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}</div>
+  return `<button class="btn ghost" data-act="back">← Library</button>
+    <div class="head" style="margin-top:1rem"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
     <div><h2>${esc(d.title)}</h2><div>${eps.length - eps.filter(e => hs.has(e.id)).length} of ${eps.length} episodes shown on the TV</div>
     <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}</div>
     <div class="actions"><button class="btn" data-act="hide-series">Hide series</button><button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
@@ -233,7 +260,7 @@ function seriesView() {
     <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select episodes"}</button></div></div></div>
     <div class="card">${eps.length ? eps.map(e => `<div class="row ${hs.has(e.id) ? "off" : ""}" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
       ${S.selecting ? `<input type="checkbox" ${S.sel.has(e.id) ? "checked" : ""} style="pointer-events:none">` : ""}
-      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `Â· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
+      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
       ${S.selecting ? "" : `<button class="btn ghost" data-act="${hs.has(e.id) ? "unhide-ep" : "hide-ep"}" data-id="${esc(e.id)}">${hs.has(e.id) ? "Unhide" : "Hide"}</button>`}
     </div>`).join("") : `<p class="dim">No episode files were found in this series.</p>`}</div>`;
 }
@@ -244,7 +271,7 @@ function hiddenView() {
   if (!top.length && !groups.length) return `<div class="card"><b>Nothing is hidden.</b><p class="dim">Films, series and episodes you hide show up here, so you can bring them back.</p></div>`;
   return `<div class="tools"><button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select"}</button></div>
     ${top.length ? `<h3>Films and series</h3><div class="grid">${top.map(i => tile(i, { dim: true })).join("")}</div>` : ""}
-    ${groups.map(g => `<h3>${esc(disp(g.s).title)} <span class="dim">Â· hidden episodes</span></h3><div class="card">${g.eps.map(e => `<div class="row" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
+    ${groups.map(g => `<h3>${esc(disp(g.s).title)} <span class="dim">· hidden episodes</span></h3><div class="card">${g.eps.map(e => `<div class="row" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
       ${S.selecting ? `<input type="checkbox" ${S.sel.has(e.id) ? "checked" : ""} style="pointer-events:none">` : ""}
       <div class="grow"><b>${esc(epLabel(e))}</b><div class="sub">${esc(e.name)}</div></div>
       ${S.selecting ? "" : `<button class="btn ghost" data-act="unhide-ep" data-id="${esc(e.id)}">Unhide</button>`}</div>`).join("")}</div>`).join("")}`;
@@ -265,9 +292,9 @@ function attention() {
 }
 function attentionView() {
   const list = attention();
-  if (!list.length) return `<div class="card"><b>All good âœ“</b><p class="dim">Every film and series has a match and a poster.</p></div>`;
+  if (!list.length) return `<div class="card"><b>All good ✓</b><p class="dim">Every film and series has a match and a poster.</p></div>`;
   return `<p class="dim">Tap one to fix it.</p><div class="card">${list.map(({ it, why }) => `<div class="row" data-act="tile" data-id="${esc(it.id)}" style="cursor:pointer">
-    <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}</div>
+    <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
     <div class="grow"><b>${esc(disp(it).title)}</b><div>${why.map(w => `<span class="chip bad">${esc(w)}</span>`).join("")}</div><div class="sub">${esc(it.fileName || it.searchTitle || "")}</div></div></div>`).join("")}</div>`;
 }
 function curVal(k) {
@@ -277,11 +304,11 @@ function curVal(k) {
   return S.status?.current?.[k];
 }
 function settingsView() {
-  if (!S.status?.schema) return `<div class="card"><b>Waiting for a TV.</b><p class="dim">Link a TV first (menu â†’ Linked TVs). Its settings appear here once it has checked in.</p></div>`;
+  if (!S.status?.schema) return `<div class="card"><b>Waiting for a TV.</b><p class="dim">Link a TV first (menu → Linked TVs). Its settings appear here once it has checked in.</p></div>`;
   const groups = {}; S.status.schema.forEach(s => (groups[s.group] ||= []).push(s));
   const pend = Object.keys(S.pending).length, unapplied = S.settings && (S.settings.version || 0) > (S.status.appliedVersion || 0);
   const seen = S.devices.map(d => d.lastSeen).filter(Boolean).sort((a, b) => b.toMillis() - a.toMillis())[0];
-  const chip = pend ? `<span class="chip warn">${pend} unsynced change${pend > 1 ? "s" : ""}</span>` : unapplied ? `<span class="chip warn">Waiting for the TVâ€¦ (last seen ${ago(seen)})</span>` : `<span class="chip ok">Synced âœ“</span>`;
+  const chip = pend ? `<span class="chip warn">${pend} unsynced change${pend > 1 ? "s" : ""}</span>` : unapplied ? `<span class="chip warn">Waiting for the TV… (last seen ${ago(seen)})</span>` : `<span class="chip ok">Synced ✓</span>`;
   return `<p class="dim">These are the settings of your linked TV. Change what you like, then press <b>Sync to TV</b>. If the TV is off, it applies them when it next starts.</p>
     ${Object.entries(groups).map(([g, list]) => `<h3>${esc(g)}</h3><div class="card">${list.map(s => {
       const v = curVal(s.key), changed = s.key in S.pending;
@@ -291,12 +318,12 @@ function settingsView() {
     <div class="syncbar">${chip}<span style="flex:1"></span><button class="btn gold" data-act="sync" ${pend ? "" : "disabled"}>Sync to TV</button></div>`;
 }
 function tvsView() {
-  return `<div class="card"><b>Link a TV</b><p class="dim">On the TV: <b>Settings â†’ Projector Room</b> shows a code. Type it here, or scan the TV's QR code.</p>
+  return `<div class="card"><b>Link a TV</b><p class="dim">On the TV: <b>Settings → Projector Room</b> shows a code. Type it here, or scan the TV's QR code.</p>
     <div class="tools"><input class="txt" id="code" placeholder="ABCD-EFGH" maxlength="9" value="${esc(S.linkParam || "")}" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px">
     <button class="btn gold" data-act="link">Link</button></div></div>
     <h3>Your TVs</h3>${S.devices.length ? `<div class="card">${S.devices.map(d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
-      <div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")} Â· last seen ${ago(d.lastSeen)}${d.appVersion ? " Â· v" + esc(d.appVersion) : ""}</div></div>
-      <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}`;
+      <div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")} · last seen ${ago(d.lastSeen)}${d.appVersion ? " · v" + esc(d.appVersion) : ""}</div></div>
+      <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}`;
 }
 function selbar() {
   if (!S.selecting || !["library", "series", "hidden"].includes(S.view)) return "";
@@ -310,7 +337,7 @@ function modalHtml() {
   if (m.type === "confirm") inner = `<h3>${esc(m.title)}</h3><div>${m.body}</div><div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn red" data-act="modal-ok">${esc(m.ok)}</button></div>`;
   else if (m.type === "sheet") {
     const it = m.item, d = disp(it);
-    inner = `<div class="head"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}</div><div><h3>${esc(d.title)}</h3><div class="dim">${esc(d.year || "")}</div>
+    inner = `<div class="head"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div><div><h3>${esc(d.title)}</h3><div class="dim">${esc(d.year || "")}</div>
       <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}
       ${it.durationMs ? `<span class="chip">${fmtDur(it.durationMs)}</span>` : ""}${it.sizeMb != null ? `<span class="chip">${it.sizeMb} MB</span>` : ""}</div>
       <div class="sub dim" style="word-break:break-all;margin-top:.4rem">${esc(it.fileName || "")}</div></div></div>
@@ -327,24 +354,27 @@ function modalHtml() {
       <div class="tabs"><button class="btn ${m.tab === "pick" ? "on" : ""}" data-act="rf-tab" data-t="pick">Pick a match</button><button class="btn ${m.tab === "paste" ? "on" : ""}" data-act="rf-tab" data-t="paste">Paste a TMDB link</button></div>`;
     if (m.error) inner += `<p class="chip bad">${esc(m.error)}</p>`;
     if (m.tab === "pick") {
-      inner += m.loading ? `<p class="dim">Searchingâ€¦</p>` : (m.results || []).map((c, i) => candHtml(c, `data-act="rf-pick" data-i="${i}"`, m.chosen === i)).join("") || `<p class="dim">No results. Try pasting a TMDB link instead.</p>`;
+      inner += m.loading ? `<p class="dim">Searching…</p>` : (m.results || []).map((c, i) => candHtml(c, `data-act="rf-pick" data-i="${i}"`, m.chosen === i)).join("") || `<p class="dim">No results. Try pasting a TMDB link instead.</p>`;
     } else {
       inner += `<input class="txt" id="rflink" style="width:100%" placeholder="https://www.themoviedb.org/movie/12345-name" value="${esc(m.pasted || "")}">
         <div class="btns" style="margin-top:.5rem"><button class="btn" data-act="rf-lookup">Look up</button></div>${m.preview ? candHtml(m.preview, "", true) : ""}`;
     }
     const pick = m.tab === "pick" ? (m.results || [])[m.chosen] : m.preview;
     inner += `<div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="rf-use" ${pick ? "" : "disabled"}>Use this</button></div>`;
+  } else if (m.type === "tvname") {
+    inner = `<h3>Rename this TV</h3><p class="dim">Only changes the name shown here.</p><input class="txt" id="tn" style="width:100%" maxlength="40" value="${esc(m.value)}">
+      <div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="tvname-save">Save</button></div>`;
   } else if (m.type === "link") {
     inner = `<h3>Link this TV?</h3><p>${esc(m.name)} is showing the code <b>${esc(m.code)}</b>.</p><div class="btns"><button class="btn ghost" data-act="modal-close">Not now</button><button class="btn gold" data-act="link-yes">Link it</button></div>`;
   }
-  return `<div class="modal-bg" data-act="modal-bg"><div class="modal">${inner}</div></div>`;
+  return `<div class="modal-bg" data-act="modal-bg"><div class="modal">${inner}</div><button class="modal-x" data-act="modal-close" aria-label="Close">&#10005;</button></div>`;
 }
 const candHtml = (c, attrs, on) => `<div class="cand ${on ? "on" : ""}" ${attrs}>${c.poster ? `<img src="${esc(c.poster)}" alt="">` : `<div class="np"></div>`}
-  <div><b>${esc(c.title)}</b> <span class="dim">${esc(c.year || "")}</span><div class="sub dim">${esc((c.overview || "").slice(0, 140))}${(c.overview || "").length > 140 ? "â€¦" : ""}</div></div></div>`;
+  <div><b>${esc(c.title)}</b> <span class="dim">${esc(c.year || "")}</span><div class="sub dim">${esc((c.overview || "").slice(0, 140))}${(c.overview || "").length > 140 ? "…" : ""}</div></div></div>`;
 
 function render() {
   if (!configured) { root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">This site isn't connected to its database yet.<br>See SETUP.md.</p></div>`; return; }
-  if (!S.ready) { root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">Loadingâ€¦</p></div>`; return; }
+  if (!S.ready) { root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">Loading…</p></div>`; return; }
   if (!S.user) {
     root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">Manage your SS Talkies library from your phone:<br>hide, rename and fix films, and change your TV's settings.</p>
       <button class="btn gold" data-act="signin" style="font-size:1.05rem;padding:.8rem 1.6rem">Sign in with Google</button>
@@ -354,7 +384,7 @@ function render() {
   const views = { library: libraryView, series: seriesView, hidden: hiddenView, attention: attentionView, settings: settingsView, tvs: tvsView };
   const titles = { library: "Library", series: "Series", hidden: "Hidden", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
   const scrollY = window.scrollY;
-  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${views[S.view]()}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${views[S.view]()}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
   window.scrollTo(0, scrollY);
 }
 
@@ -396,7 +426,7 @@ const A = {
   "rf-lookup": async () => {
     const m = S.modal, text = document.getElementById("rflink").value.trim(); m.pasted = text; m.error = null; m.preview = null;
     const hit = text.match(/themoviedb\.org\/(movie|tv)\/(\d+)/i);
-    if (!hit) { m.error = "That doesn't look like a TMDB link (it should contain /movie/â€¦ or /tv/â€¦)."; return render(); }
+    if (!hit) { m.error = "That doesn't look like a TMDB link (it should contain /movie/… or /tv/…)."; return render(); }
     const type = hit[1].toLowerCase(), want = m.item.kind === "series" ? "tv" : "movie";
     if (type !== want) { m.error = `That's a ${type === "tv" ? "series" : "film"} link, but this is a ${want === "tv" ? "series" : "film"}.`; return render(); }
     try { m.preview = asMatch(await tmdb(`/${type}/${hit[2]}`), type); } catch (e) { m.error = "Couldn't find that on TMDB."; }
@@ -410,10 +440,18 @@ const A = {
   sync: async () => {
     const prev = (S.settings && (S.settings.version || 0) > (S.status?.appliedVersion || 0)) ? (S.settings.values || {}) : {};
     await setDoc(uidRef("data", "settings"), { values: { ...prev, ...S.pending }, version: Date.now() });
-    S.pending = {}; toast("Sent. The TV applies it within a couple of minutes â€” or as soon as it's switched on.");
+    S.pending = {}; toast("Sent. The TV applies it within a couple of minutes — or as soon as it's switched on.");
   },
   link: () => linkTv(document.getElementById("code").value),
   "link-yes": async () => { const c = S.modal.code; closeModal(); S.linkParam = null; history.replaceState(null, "", location.pathname); await linkTv(c); },
+  "pick-tv": el => { S.tv = el.dataset.id; try { localStorage.setItem("pr_tv", S.tv); } catch (e) {} S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
+  "rename-tv": el => { const d = S.devices.find(x => x.id === el.dataset.id); S.modal = { type: "tvname", id: el.dataset.id, value: d?.name || "" }; render(); },
+  "tvname-save": async () => { const id = S.modal.id, v = document.getElementById("tn").value.trim(); if (!v) return; await merge(uidRef("devices", id), { name: v }); closeModal(); toast("Renamed."); },
+  install: async () => {
+    S.drawer = false;
+    if (S.installEvt) { const e = S.installEvt; S.installEvt = null; e.prompt(); await e.userChoice.catch(() => {}); render(); return; }
+    S.modal = { type: "confirm", title: "Add to Home Screen", body: "In Safari, tap the <b>Share</b> button, then <b>Add to Home Screen</b>.", ok: "Got it", run: async () => {} }; render();
+  },
   "remove-tv": el => { S.modal = { type: "confirm", title: "Remove this TV?", body: "It stops syncing. You can link it again with a new code.", ok: "Remove",
     run: async () => { await deleteDoc(uidRef("devices", el.dataset.id)); toast("Removed."); } }; render(); },
 };
@@ -421,12 +459,30 @@ document.addEventListener("click", e => { const el = e.target.closest("[data-act
 document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort") { S.sort = el.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
 document.addEventListener("input", e => { if (e.target.id === "q") { S.q = e.target.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
 
+// ---------- back button, install, offline shell ----------
+// Back opens the menu first (after closing anything open on top); pressing it again leaves.
+history.replaceState({ pr: 0 }, "");
+history.pushState({ pr: 1 }, "");
+addEventListener("popstate", () => {
+  if (!S.user) return;
+  if (S.modal || S.selecting || S.view === "series" || !S.drawer) {
+    history.pushState({ pr: 1 }, "");
+    if (S.modal) closeModal(); else if (S.selecting) A.select(); else if (S.view === "series") A.back(); else { S.drawer = true; render(); }
+    return;
+  }
+  S.drawer = false; history.back();
+});
+addEventListener("beforeinstallprompt", e => { e.preventDefault(); S.installEvt = e; render(); });
+addEventListener("appinstalled", () => { S.installEvt = null; render(); });
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+
 // ---------- start ----------
 if (configured) {
   const app = initializeApp(FIREBASE_CONFIG); auth = getAuth(app); db = getFirestore(app);
   onAuthStateChanged(auth, user => {
     unsubs.forEach(u => u()); unsubs = []; S.user = user; S.ready = true;
     if (user) {
+      if (history.state?.pr !== 1) history.pushState({ pr: 1 }, "");
       const watch = (ref, fn) => unsubs.push(onSnapshot(ref, fn, err => console.warn("listen", err.code)));
       watch(collection(db, "users", user.uid, "library"), s => { S.chunks = {}; s.forEach(d => S.chunks[d.id] = d.data()); render(); });
       watch(uidRef("data", "overrides"), d => { S.overrides = d.exists() ? d.data() : {}; render(); });
