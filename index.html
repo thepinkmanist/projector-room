@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Projector Room</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f0a08; --panel:#1a1311; --line:#2d2320; --text:#f3ece6; --dim:#a99b92; --gold:#ffdd97; --red:#a43b38; --ok:#6fcf97; --bad:#ef6b5f; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  button { font:inherit; color:inherit; cursor:pointer; }
+  .btn { border:0; border-radius:999px; padding:.65rem 1.1rem; background:#2b211e; font-weight:600; }
+  .btn.gold { background:var(--gold); color:#1a1109; }
+  .btn.red { background:var(--red); color:#fff; }
+  .btn.ghost { background:transparent; border:1px solid var(--line); }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .center { min-height:100vh; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:2rem; gap:1rem; }
+  .logo { font:800 2.4rem Georgia,"Playfair Display",serif; color:var(--gold); letter-spacing:.02em; }
+  .dim { color:var(--dim); }
+  .bar { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:.75rem; padding:.7rem 1rem; background:rgba(15,10,8,.95); border-bottom:1px solid var(--line); }
+  .bar h1 { margin:0; font:700 1.15rem Georgia,serif; color:var(--gold); flex:1; }
+  .icon { background:none; border:0; font-size:1.5rem; padding:.2rem .5rem; }
+  .avatar { width:32px; height:32px; border-radius:50%; background:#2b211e; }
+  .drawer-bg { position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:8; }
+  .drawer { position:fixed; top:0; left:0; bottom:0; width:260px; background:var(--panel); z-index:9; padding:1rem 0; overflow:auto; }
+  .drawer .who { padding:.5rem 1.2rem 1rem; border-bottom:1px solid var(--line); margin-bottom:.5rem; word-break:break-all; }
+  .nav { display:flex; width:100%; text-align:left; align-items:center; gap:.7rem; background:none; border:0; padding:.85rem 1.2rem; font-size:1rem; }
+  .nav.on { background:#2b211e; color:var(--gold); }
+  .nav .n { margin-left:auto; background:var(--red); color:#fff; border-radius:999px; font-size:.75rem; padding:0 .5rem; }
+  main { padding:1rem; max-width:1100px; margin:0 auto; padding-bottom:6rem; }
+  .tools { display:flex; gap:.6rem; flex-wrap:wrap; margin-bottom:1rem; align-items:center; }
+  .tools input[type=search], .tools select, input.txt { background:var(--panel); border:1px solid var(--line); color:var(--text); border-radius:10px; padding:.6rem .8rem; font:inherit; }
+  .tools input[type=search] { flex:1; min-width:140px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(104px,1fr)); gap:14px 10px; }
+  .tile { cursor:pointer; position:relative; }
+  .poster { position:relative; aspect-ratio:2/3; border-radius:8px; overflow:hidden; background:#241b18; }
+  .poster img { width:100%; height:100%; object-fit:cover; display:block; }
+  .noposter { display:flex; align-items:center; justify-content:center; height:100%; font-size:2rem; }
+  .badge { position:absolute; top:5px; right:5px; background:rgba(0,0,0,.75); border-radius:6px; padding:0 .4rem; font-size:.78rem; }
+  .check { position:absolute; top:5px; left:5px; width:24px; height:24px; border-radius:50%; background:rgba(0,0,0,.6); border:2px solid #fff; display:flex; align-items:center; justify-content:center; font-weight:800; }
+  .tile.sel .poster { outline:3px solid var(--gold); }
+  .tile.sel .check { background:var(--gold); color:#1a1109; border-color:var(--gold); }
+  .tile .t { margin-top:.35rem; font-size:.88rem; line-height:1.2; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .tile .y { font-size:.78rem; color:var(--dim); }
+  .tile.dim .poster { opacity:.5; }
+  .selbar { position:fixed; left:0; right:0; bottom:0; z-index:6; display:flex; gap:.6rem; align-items:center; padding:.8rem 1rem; background:var(--panel); border-top:1px solid var(--line); }
+  .selbar .c { flex:1; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:1rem; margin-bottom:1rem; }
+  .row { display:flex; align-items:center; gap:.7rem; padding:.7rem .2rem; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; }
+  .row .grow { flex:1; min-width:0; }
+  .row .sub { color:var(--dim); font-size:.82rem; word-break:break-all; }
+  .row.off { opacity:.5; }
+  .chip { display:inline-block; padding:.1rem .6rem; border-radius:999px; background:#2b211e; font-size:.8rem; margin:.1rem .25rem .1rem 0; }
+  .chip.ok { color:var(--ok); } .chip.bad { color:var(--bad); } .chip.warn { color:var(--gold); }
+  .head { display:flex; gap:1rem; margin-bottom:1rem; }
+  .head .poster { width:100px; flex:none; }
+  .head h2 { margin:.1rem 0 .4rem; }
+  .actions { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.6rem; }
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:20; display:flex; align-items:flex-end; justify-content:center; }
+  .modal { background:var(--panel); width:100%; max-width:560px; max-height:92vh; overflow:auto; border-radius:18px 18px 0 0; padding:1.2rem; }
+  @media (min-width:700px) { .modal-bg { align-items:center; } .modal { border-radius:18px; } }
+  .modal h3 { margin:.1rem 0 .6rem; }
+  .modal .btns { display:flex; gap:.6rem; justify-content:flex-end; margin-top:1rem; flex-wrap:wrap; }
+  .cand { display:flex; gap:.8rem; padding:.6rem; border:1px solid var(--line); border-radius:10px; margin-bottom:.6rem; cursor:pointer; }
+  .cand:hover, .cand.on { border-color:var(--gold); }
+  .cand img, .cand .np { width:56px; height:84px; object-fit:cover; border-radius:6px; background:#241b18; flex:none; }
+  .tabs { display:flex; gap:.4rem; margin-bottom:.8rem; }
+  .tabs .btn.on { background:var(--gold); color:#1a1109; }
+  .toast { position:fixed; left:50%; bottom:5.5rem; transform:translateX(-50%); background:#2b211e; border:1px solid var(--gold); padding:.7rem 1.1rem; border-radius:12px; z-index:30; max-width:90vw; }
+  select.set { background:#2b211e; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:.45rem .5rem; font:inherit; max-width:55vw; }
+  .tog { width:46px; height:26px; appearance:none; background:#3a2e2a; border-radius:999px; position:relative; cursor:pointer; flex:none; }
+  .tog::after { content:""; position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:#fff; transition:left .15s; }
+  .tog:checked { background:var(--gold); } .tog:checked::after { left:23px; background:#1a1109; }
+  .changed { border-left:3px solid var(--gold); padding-left:.6rem; }
+  .syncbar { position:sticky; bottom:0; display:flex; gap:.8rem; align-items:center; padding:.8rem 0; background:linear-gradient(transparent, var(--bg) 30%); }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, arrayUnion, arrayRemove, deleteField, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+// ---- Fill these in from the Firebase console (see SETUP.md). They are not secrets: ----
+// ---- the security rules, not these values, are what protect the data.               ----
+const FIREBASE_CONFIG = { apiKey:"AIzaSyDK2xcgZHZQ-dBLgEX4IDln-y388fvLIkI", authDomain:"projector-room.firebaseapp.com", projectId:"projector-room", appId:"1:283528306112:web:5491e49c77e8107e5a3c25" };
+const TMDB_KEY = "a0b6d45d97a2339d5424a444f38dfa6f"; // themoviedb.org API key (v3), used only to look up posters when fixing a match
+
+const configured = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const root = document.getElementById("root");
+
+const S = {
+  user: null, ready: false,
+  chunks: {}, overrides: {}, settings: null, status: null, devices: [],
+  view: "library", seriesId: null, selecting: false, sel: new Set(),
+  q: "", sort: "new", drawer: false, pending: {}, modal: null, toast: null,
+  linkParam: new URLSearchParams(location.search).get("link"),
+};
+let auth, db, unsubs = [], toastTimer;
+
+// ---------- data helpers ----------
+const uidRef = (...p) => doc(db, "users", S.user.uid, ...p);
+const hiddenSet = () => new Set(S.overrides.hidden || []);
+function allItems() {
+  const m = new Map();
+  for (const c of Object.values(S.chunks)) for (const it of (c.items || [])) m.set(it.id, it);
+  return [...m.values()];
+}
+function disp(it) {
+  const o = (S.overrides.tmdb || {})[it.id], t = (S.overrides.titles || {})[it.id];
+  return { title: t || (o && o.title) || it.title, poster: (o && o.poster) || it.poster, year: (o && o.year) || it.year,
+           renamed: !!t, chosen: !!o, matched: o ? true : !!it.matched };
+}
+const fmtDur = ms => { if (!ms) return ""; const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}min` : `${m}min`; };
+const ep = e => `S${String(e.season ?? 0).padStart(2, "0")} E${String(e.episode ?? 0).padStart(2, "0")}`;
+const epLabel = e => (e.season != null || e.episode != null) ? ep(e) : "â€”";
+function ago(ts) {
+  if (!ts) return "never";
+  const d = ts.toDate ? ts.toDate() : new Date(ts); const s = (Date.now() - d.getTime()) / 1000;
+  if (s < 90) return "just now"; if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} hr ago`; return `${Math.round(s / 86400)} days ago`;
+}
+const visibleEps = it => (it.episodes || []).filter(e => !hiddenSet().has(e.id));
+function toast(msg) { S.toast = msg; render(); clearTimeout(toastTimer); toastTimer = setTimeout(() => { S.toast = null; render(); }, 4000); }
+const names = (ids) => { const m = new Map(); allItems().forEach(i => { m.set(i.id, disp(i).title); (i.episodes || []).forEach(e => m.set(e.id, `${disp(i).title} ${epLabel(e)}`)); }); return ids.map(i => m.get(i) || i); };
+
+// ---------- writes ----------
+const merge = (ref, data) => setDoc(ref, data, { merge: true });
+async function hideIds(ids) { await merge(uidRef("data", "overrides"), { hidden: arrayUnion(...ids) }); }
+async function unhideIds(ids) { await merge(uidRef("data", "overrides"), { hidden: arrayRemove(...ids) }); }
+async function renameItem(id, text) { await merge(uidRef("data", "overrides"), { titles: { [id]: text ? text : deleteField() } }); }
+async function chooseMatch(id, m) { await merge(uidRef("data", "overrides"), { tmdb: { [id]: { id: m.id, type: m.type, title: m.title, year: m.year || null, poster: m.poster || null } } }); }
+async function resetMatch(id) { await merge(uidRef("data", "overrides"), { tmdb: { [id]: deleteField() } }); }
+
+function confirmHide(ids, then) {
+  const n = names(ids), shown = n.slice(0, 5).map(esc).join("<br>"), more = n.length > 5 ? `<br>â€¦and ${n.length - 5} more` : "";
+  S.modal = { type: "confirm", title: `Hide ${ids.length === 1 ? "this" : ids.length + " items"}?`,
+    body: `${shown}${more}<p class="dim">They disappear from the TV but stay in Google Drive. You can bring them back any time from <b>Hidden</b>.</p>`,
+    ok: "Hide", run: async () => { await hideIds(ids); S.sel.clear(); S.selecting = false; toast(`Hidden. The TV updates within a couple of minutes.`); if (then) then(); } };
+  render();
+}
+
+// ---------- TMDB ----------
+async function tmdb(path, params = {}) {
+  if (!TMDB_KEY) throw new Error("TMDB key missing");
+  const u = new URL("https://api.themoviedb.org/3" + path); u.searchParams.set("api_key", TMDB_KEY);
+  Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, v));
+  const r = await fetch(u); if (!r.ok) throw new Error("TMDB " + r.status); return r.json();
+}
+const IMG = "https://image.tmdb.org/t/p/w342";
+const asMatch = (r, type) => ({ id: r.id, type, title: r.title || r.name, year: ((r.release_date || r.first_air_date || "").slice(0, 4)) * 1 || null,
+  poster: r.poster_path ? IMG + r.poster_path : null, overview: r.overview || "" });
+async function candidates(item) {
+  const type = item.kind === "series" ? "tv" : "movie";
+  const q = (item.searchTitle || item.title).replace(/[\[(]?\s*season\s*\d+\s*[)\]]?/ig, "").trim();
+  const res = await tmdb("/search/" + type, { query: q });
+  let list = (res.results || []).map(r => asMatch(r, type));
+  if (item.searchYear) list.sort((a, b) => (b.year === item.searchYear) - (a.year === item.searchYear));
+  return list.slice(0, 8);
+}
+
+// ---------- link a TV ----------
+async function linkTv(raw) {
+  const code = String(raw || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  if (code.length !== 8) return toast("A code has 8 letters and numbers.");
+  try {
+    const ref = doc(db, "links", code), snap = await getDoc(ref);
+    if (!snap.exists()) return toast("No TV is showing that code. Check it and try again.");
+    const l = snap.data();
+    if (l.claimedBy) return toast("That code has already been used.");
+    if (l.expiresAt.toDate() < new Date()) return toast("That code has expired. Press OK on the TV for a new one.");
+    await setDoc(uidRef("devices", l.deviceUid), { name: l.deviceName, kind: l.kind, ownerEmail: S.user.email, linkedAt: serverTimestamp() });
+    await updateDoc(ref, { claimedBy: S.user.uid });
+    S.view = "tvs"; toast(`Linked ${l.deviceName}. It shows up here within a minute.`);
+  } catch (e) { toast("Couldn't link: " + (e.message || e)); }
+}
+
+// ---------- views ----------
+function topbar() {
+  return `<div class="bar"><button class="icon" data-act="drawer" aria-label="Menu">â˜°</button><h1>Projector Room</h1>
+    ${S.user.photoURL ? `<img class="avatar" src="${esc(S.user.photoURL)}" alt="">` : ""}</div>`;
+}
+function drawer() {
+  if (!S.drawer) return "";
+  const hs = hiddenSet(), nAtt = attention().length, nHid = hs.size;
+  const nav = (v, ico, label, n) => `<button class="nav ${S.view === v || (v === "library" && S.view === "series") ? "on" : ""}" data-act="nav" data-v="${v}">${ico} ${label}${n ? `<span class="n">${n}</span>` : ""}</button>`;
+  return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
+    <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
+    ${nav("library", "ðŸŽ¬", "Library")}${nav("hidden", "ðŸ™ˆ", "Hidden", nHid)}${nav("attention", "âš ï¸", "Needs attention", nAtt)}
+    ${nav("settings", "âš™ï¸", "TV settings")}${nav("tvs", "ðŸ“º", "Linked TVs")}
+    <button class="nav" data-act="signout">â†© Sign out</button></div>`;
+}
+function tile(it, opts = {}) {
+  const d = disp(it), sel = S.sel.has(it.id);
+  return `<div class="tile ${sel ? "sel" : ""} ${opts.dim ? "dim" : ""}" data-act="tile" data-id="${esc(it.id)}">
+    <div class="poster">${d.poster ? `<img loading="lazy" src="${esc(d.poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}
+    ${it.kind === "series" ? `<span class="badge">${visibleEps(it).length} ep</span>` : ""}
+    ${S.selecting ? `<span class="check">${sel ? "âœ“" : ""}</span>` : ""}</div>
+    <div class="t">${esc(d.title)}</div><div class="y">${esc(d.year || "")}${it.kind === "series" ? " Â· series" : ""}</div></div>`;
+}
+function libraryItems() {
+  const hs = hiddenSet(), q = S.q.trim().toLowerCase();
+  let items = allItems().filter(i => !hs.has(i.id) && (!(i.kind === "series" && i.episodes?.length && visibleEps(i).length === 0)));
+  if (q) items = items.filter(i => disp(i).title.toLowerCase().includes(q));
+  items.sort(S.sort === "az" ? (a, b) => disp(a).title.localeCompare(disp(b).title) : (a, b) => String(b.added).localeCompare(String(a.added)));
+  return items;
+}
+function gridHtml() {
+  const items = libraryItems();
+  if (!allItems().length) return `<div class="card"><b>Nothing here yet.</b><p class="dim">Your TV uploads its film list a few seconds after it opens. If this TV isn't linked yet, open <b>Linked TVs</b> in the menu.</p></div>`;
+  return items.length ? `<div class="grid">${items.map(i => tile(i)).join("")}</div>` : `<p class="dim">No films match.</p>`;
+}
+function libraryView() {
+  return `<div class="tools"><input type="search" id="q" placeholder="Search" value="${esc(S.q)}">
+    <select id="sort"><option value="new" ${S.sort === "new" ? "selected" : ""}>Newest</option><option value="az" ${S.sort === "az" ? "selected" : ""}>Aâ€“Z</option></select>
+    <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select"}</button></div>
+    <div id="gridbox">${gridHtml()}</div>`;
+}
+function seriesView() {
+  const it = allItems().find(i => i.id === S.seriesId); if (!it) { S.view = "library"; return libraryView(); }
+  const d = disp(it), hs = hiddenSet(), eps = it.episodes || [];
+  return `<button class="btn ghost" data-act="back">â† Library</button>
+    <div class="head" style="margin-top:1rem"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}</div>
+    <div><h2>${esc(d.title)}</h2><div>${eps.length - eps.filter(e => hs.has(e.id)).length} of ${eps.length} episodes shown on the TV</div>
+    <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}</div>
+    <div class="actions"><button class="btn" data-act="hide-series">Hide series</button><button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
+    <button class="btn" data-act="refetch" data-id="${esc(it.id)}">Refetch details</button>
+    <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select episodes"}</button></div></div></div>
+    <div class="card">${eps.length ? eps.map(e => `<div class="row ${hs.has(e.id) ? "off" : ""}" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
+      ${S.selecting ? `<input type="checkbox" ${S.sel.has(e.id) ? "checked" : ""} style="pointer-events:none">` : ""}
+      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `Â· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
+      ${S.selecting ? "" : `<button class="btn ghost" data-act="${hs.has(e.id) ? "unhide-ep" : "hide-ep"}" data-id="${esc(e.id)}">${hs.has(e.id) ? "Unhide" : "Hide"}</button>`}
+    </div>`).join("") : `<p class="dim">No episode files were found in this series.</p>`}</div>`;
+}
+function hiddenView() {
+  const hs = hiddenSet(), items = allItems();
+  const top = items.filter(i => hs.has(i.id));
+  const groups = items.filter(i => i.kind === "series" && !hs.has(i.id)).map(s => ({ s, eps: (s.episodes || []).filter(e => hs.has(e.id)) })).filter(g => g.eps.length);
+  if (!top.length && !groups.length) return `<div class="card"><b>Nothing is hidden.</b><p class="dim">Films, series and episodes you hide show up here, so you can bring them back.</p></div>`;
+  return `<div class="tools"><button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select"}</button></div>
+    ${top.length ? `<h3>Films and series</h3><div class="grid">${top.map(i => tile(i, { dim: true })).join("")}</div>` : ""}
+    ${groups.map(g => `<h3>${esc(disp(g.s).title)} <span class="dim">Â· hidden episodes</span></h3><div class="card">${g.eps.map(e => `<div class="row" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
+      ${S.selecting ? `<input type="checkbox" ${S.sel.has(e.id) ? "checked" : ""} style="pointer-events:none">` : ""}
+      <div class="grow"><b>${esc(epLabel(e))}</b><div class="sub">${esc(e.name)}</div></div>
+      ${S.selecting ? "" : `<button class="btn ghost" data-act="unhide-ep" data-id="${esc(e.id)}">Unhide</button>`}</div>`).join("")}</div>`).join("")}`;
+}
+function attention() {
+  const hs = hiddenSet(), items = allItems().filter(i => !hs.has(i.id)), count = {};
+  items.forEach(i => { if (i.kind === "film" && i.tmdbId) count[i.tmdbId] = (count[i.tmdbId] || 0) + 1; });
+  const out = [];
+  for (const it of items) {
+    const d = disp(it), why = [];
+    if (!d.matched) why.push("No match found");
+    else if (!d.poster) why.push("No poster");
+    if (it.kind === "film" && it.tmdbId && !d.chosen && count[it.tmdbId] > 1) why.push("Possible duplicate");
+    if (it.kind === "film" && it.sizeMb != null && it.sizeMb < 50) why.push("Very small file (a sample or trailer?)");
+    if (why.length) out.push({ it, why });
+  }
+  return out;
+}
+function attentionView() {
+  const list = attention();
+  if (!list.length) return `<div class="card"><b>All good âœ“</b><p class="dim">Every film and series has a match and a poster.</p></div>`;
+  return `<p class="dim">Tap one to fix it.</p><div class="card">${list.map(({ it, why }) => `<div class="row" data-act="tile" data-id="${esc(it.id)}" style="cursor:pointer">
+    <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}</div>
+    <div class="grow"><b>${esc(disp(it).title)}</b><div>${why.map(w => `<span class="chip bad">${esc(w)}</span>`).join("")}</div><div class="sub">${esc(it.fileName || it.searchTitle || "")}</div></div></div>`).join("")}</div>`;
+}
+function curVal(k) {
+  if (k in S.pending) return S.pending[k];
+  const unapplied = S.settings && (S.settings.version || 0) > (S.status?.appliedVersion || 0);
+  if (unapplied && S.settings.values && k in S.settings.values) return S.settings.values[k];
+  return S.status?.current?.[k];
+}
+function settingsView() {
+  if (!S.status?.schema) return `<div class="card"><b>Waiting for a TV.</b><p class="dim">Link a TV first (menu â†’ Linked TVs). Its settings appear here once it has checked in.</p></div>`;
+  const groups = {}; S.status.schema.forEach(s => (groups[s.group] ||= []).push(s));
+  const pend = Object.keys(S.pending).length, unapplied = S.settings && (S.settings.version || 0) > (S.status.appliedVersion || 0);
+  const seen = S.devices.map(d => d.lastSeen).filter(Boolean).sort((a, b) => b.toMillis() - a.toMillis())[0];
+  const chip = pend ? `<span class="chip warn">${pend} unsynced change${pend > 1 ? "s" : ""}</span>` : unapplied ? `<span class="chip warn">Waiting for the TVâ€¦ (last seen ${ago(seen)})</span>` : `<span class="chip ok">Synced âœ“</span>`;
+  return `<p class="dim">These are the settings of your linked TV. Change what you like, then press <b>Sync to TV</b>. If the TV is off, it applies them when it next starts.</p>
+    ${Object.entries(groups).map(([g, list]) => `<h3>${esc(g)}</h3><div class="card">${list.map(s => {
+      const v = curVal(s.key), changed = s.key in S.pending;
+      const ctl = s.type === "bool" ? `<input type="checkbox" class="tog" data-act="set" data-key="${esc(s.key)}" ${v ? "checked" : ""}>` :
+        `<select class="set" data-act="set" data-key="${esc(s.key)}">${s.options.map(o => `<option value="${esc(o.value)}" ${String(v) === o.value ? "selected" : ""}>${esc(o.label)}</option>`).join("")}${!s.options.some(o => o.value === String(v)) && v != null ? `<option selected>${esc(v)} (set on the TV)</option>` : ""}</select>`;
+      return `<div class="row ${changed ? "changed" : ""}"><div class="grow">${esc(s.label)}</div>${ctl}</div>`; }).join("")}</div>`).join("")}
+    <div class="syncbar">${chip}<span style="flex:1"></span><button class="btn gold" data-act="sync" ${pend ? "" : "disabled"}>Sync to TV</button></div>`;
+}
+function tvsView() {
+  return `<div class="card"><b>Link a TV</b><p class="dim">On the TV: <b>Settings â†’ Projector Room</b> shows a code. Type it here, or scan the TV's QR code.</p>
+    <div class="tools"><input class="txt" id="code" placeholder="ABCD-EFGH" maxlength="9" value="${esc(S.linkParam || "")}" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px">
+    <button class="btn gold" data-act="link">Link</button></div></div>
+    <h3>Your TVs</h3>${S.devices.length ? `<div class="card">${S.devices.map(d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
+      <div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")} Â· last seen ${ago(d.lastSeen)}${d.appVersion ? " Â· v" + esc(d.appVersion) : ""}</div></div>
+      <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}`;
+}
+function selbar() {
+  if (!S.selecting || !["library", "series", "hidden"].includes(S.view)) return "";
+  const n = S.sel.size, hidden = S.view === "hidden";
+  return `<div class="selbar"><span class="c">${n} selected</span><button class="btn ghost" data-act="select">Cancel</button>
+    <button class="btn ${hidden ? "gold" : "red"}" data-act="${hidden ? "unhide-sel" : "hide-sel"}" ${n ? "" : "disabled"}>${hidden ? "Unhide" : "Hide"} (${n})</button></div>`;
+}
+function modalHtml() {
+  const m = S.modal; if (!m) return "";
+  let inner = "";
+  if (m.type === "confirm") inner = `<h3>${esc(m.title)}</h3><div>${m.body}</div><div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn red" data-act="modal-ok">${esc(m.ok)}</button></div>`;
+  else if (m.type === "sheet") {
+    const it = m.item, d = disp(it);
+    inner = `<div class="head"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">ðŸŽ¬</div>`}</div><div><h3>${esc(d.title)}</h3><div class="dim">${esc(d.year || "")}</div>
+      <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}
+      ${it.durationMs ? `<span class="chip">${fmtDur(it.durationMs)}</span>` : ""}${it.sizeMb != null ? `<span class="chip">${it.sizeMb} MB</span>` : ""}</div>
+      <div class="sub dim" style="word-break:break-all;margin-top:.4rem">${esc(it.fileName || "")}</div></div></div>
+      <div class="btns" style="justify-content:flex-start"><button class="btn" data-act="hide-one" data-id="${esc(it.id)}">Hide</button><button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
+      <button class="btn" data-act="refetch" data-id="${esc(it.id)}">Refetch details</button>${d.chosen ? `<button class="btn ghost" data-act="reset-match" data-id="${esc(it.id)}">Back to automatic</button>` : ""}
+      <button class="btn ghost" data-act="modal-close">Close</button></div>`;
+  } else if (m.type === "rename") {
+    inner = `<h3>Rename</h3><p class="dim">Changes the name shown on the TV. The file in Google Drive keeps its name.</p>
+      <input class="txt" id="rn" style="width:100%" value="${esc(m.value)}"><div class="btns">${m.hasOverride ? `<button class="btn ghost" data-act="rename-reset">Use original name</button>` : ""}
+      <button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="rename-save">Save</button></div>`;
+  } else if (m.type === "refetch") {
+    const it = m.item;
+    inner = `<h3>Refetch details</h3><p class="dim">Pick the right ${it.kind === "series" ? "series" : "film"}. The TV then shows its poster, name and story.</p>
+      <div class="tabs"><button class="btn ${m.tab === "pick" ? "on" : ""}" data-act="rf-tab" data-t="pick">Pick a match</button><button class="btn ${m.tab === "paste" ? "on" : ""}" data-act="rf-tab" data-t="paste">Paste a TMDB link</button></div>`;
+    if (m.error) inner += `<p class="chip bad">${esc(m.error)}</p>`;
+    if (m.tab === "pick") {
+      inner += m.loading ? `<p class="dim">Searchingâ€¦</p>` : (m.results || []).map((c, i) => candHtml(c, `data-act="rf-pick" data-i="${i}"`, m.chosen === i)).join("") || `<p class="dim">No results. Try pasting a TMDB link instead.</p>`;
+    } else {
+      inner += `<input class="txt" id="rflink" style="width:100%" placeholder="https://www.themoviedb.org/movie/12345-name" value="${esc(m.pasted || "")}">
+        <div class="btns" style="margin-top:.5rem"><button class="btn" data-act="rf-lookup">Look up</button></div>${m.preview ? candHtml(m.preview, "", true) : ""}`;
+    }
+    const pick = m.tab === "pick" ? (m.results || [])[m.chosen] : m.preview;
+    inner += `<div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="rf-use" ${pick ? "" : "disabled"}>Use this</button></div>`;
+  } else if (m.type === "link") {
+    inner = `<h3>Link this TV?</h3><p>${esc(m.name)} is showing the code <b>${esc(m.code)}</b>.</p><div class="btns"><button class="btn ghost" data-act="modal-close">Not now</button><button class="btn gold" data-act="link-yes">Link it</button></div>`;
+  }
+  return `<div class="modal-bg" data-act="modal-bg"><div class="modal">${inner}</div></div>`;
+}
+const candHtml = (c, attrs, on) => `<div class="cand ${on ? "on" : ""}" ${attrs}>${c.poster ? `<img src="${esc(c.poster)}" alt="">` : `<div class="np"></div>`}
+  <div><b>${esc(c.title)}</b> <span class="dim">${esc(c.year || "")}</span><div class="sub dim">${esc((c.overview || "").slice(0, 140))}${(c.overview || "").length > 140 ? "â€¦" : ""}</div></div></div>`;
+
+function render() {
+  if (!configured) { root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">This site isn't connected to its database yet.<br>See SETUP.md.</p></div>`; return; }
+  if (!S.ready) { root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">Loadingâ€¦</p></div>`; return; }
+  if (!S.user) {
+    root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">Manage your SS Talkies library from your phone:<br>hide, rename and fix films, and change your TV's settings.</p>
+      <button class="btn gold" data-act="signin" style="font-size:1.05rem;padding:.8rem 1.6rem">Sign in with Google</button>
+      ${S.linkParam ? `<p class="dim">Sign in to link the TV that showed code <b>${esc(S.linkParam)}</b>.</p>` : ""}</div>${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+    return;
+  }
+  const views = { library: libraryView, series: seriesView, hidden: hiddenView, attention: attentionView, settings: settingsView, tvs: tvsView };
+  const titles = { library: "Library", series: "Series", hidden: "Hidden", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
+  const scrollY = window.scrollY;
+  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${views[S.view]()}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+  window.scrollTo(0, scrollY);
+}
+
+// ---------- actions ----------
+const find = id => allItems().find(i => i.id === id);
+const closeModal = () => { S.modal = null; render(); };
+function openRefetch(item) {
+  S.modal = { type: "refetch", item, tab: "pick", loading: true, results: [], chosen: null, error: null, pasted: "", preview: null }; render();
+  candidates(item).then(list => { if (S.modal?.item === item) { S.modal.results = list; S.modal.loading = false; S.modal.chosen = list.length ? 0 : null; render(); } })
+    .catch(e => { if (S.modal?.item === item) { S.modal.loading = false; S.modal.error = "Couldn't search: " + e.message; render(); } });
+}
+const A = {
+  signin: async () => { try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch (e) { toast("Sign-in didn't finish: " + (e.code || e.message)); } },
+  signout: () => { S.drawer = false; signOut(auth); },
+  drawer: () => { S.drawer = !S.drawer; render(); },
+  nav: el => { S.view = el.dataset.v; S.drawer = false; S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
+  back: () => { S.view = "library"; S.selecting = false; S.sel.clear(); render(); },
+  select: () => { S.selecting = !S.selecting; S.sel.clear(); render(); },
+  tile: el => {
+    const it = find(el.dataset.id); if (!it) return;
+    if (S.selecting) { S.sel.has(it.id) ? S.sel.delete(it.id) : S.sel.add(it.id); render(); return; }
+    if (it.kind === "series" && S.view !== "attention") { S.seriesId = it.id; S.view = "series"; render(); window.scrollTo(0, 0); return; }
+    S.modal = { type: "sheet", item: it }; render();
+  },
+  epsel: el => { const id = el.dataset.id; S.sel.has(id) ? S.sel.delete(id) : S.sel.add(id); render(); },
+  "hide-sel": () => confirmHide([...S.sel]),
+  "unhide-sel": async () => { await unhideIds([...S.sel]); S.sel.clear(); S.selecting = false; toast("Unhidden."); },
+  "hide-one": el => confirmHide([el.dataset.id]),
+  "hide-series": () => confirmHide([S.seriesId], () => { S.view = "library"; }),
+  "hide-ep": el => confirmHide([el.dataset.id]),
+  "unhide-ep": async el => { await unhideIds([el.dataset.id]); toast("Unhidden."); },
+  rename: el => { const it = find(el.dataset.id); S.modal = { type: "rename", item: it, value: disp(it).title, hasOverride: !!(S.overrides.titles || {})[it.id] }; render(); },
+  "rename-save": async () => { const v = document.getElementById("rn").value.trim(), it = S.modal.item; await renameItem(it.id, v && v !== it.title ? v : ""); closeModal(); toast("Renamed."); },
+  "rename-reset": async () => { await renameItem(S.modal.item.id, ""); closeModal(); toast("Original name restored."); },
+  refetch: el => openRefetch(find(el.dataset.id)),
+  "reset-match": async el => { await resetMatch(el.dataset.id); closeModal(); toast("Back to automatic. The TV looks it up again."); },
+  "rf-tab": el => { S.modal.tab = el.dataset.t; S.modal.error = null; render(); },
+  "rf-pick": el => { S.modal.chosen = +el.dataset.i; render(); },
+  "rf-lookup": async () => {
+    const m = S.modal, text = document.getElementById("rflink").value.trim(); m.pasted = text; m.error = null; m.preview = null;
+    const hit = text.match(/themoviedb\.org\/(movie|tv)\/(\d+)/i);
+    if (!hit) { m.error = "That doesn't look like a TMDB link (it should contain /movie/â€¦ or /tv/â€¦)."; return render(); }
+    const type = hit[1].toLowerCase(), want = m.item.kind === "series" ? "tv" : "movie";
+    if (type !== want) { m.error = `That's a ${type === "tv" ? "series" : "film"} link, but this is a ${want === "tv" ? "series" : "film"}.`; return render(); }
+    try { m.preview = asMatch(await tmdb(`/${type}/${hit[2]}`), type); } catch (e) { m.error = "Couldn't find that on TMDB."; }
+    render();
+  },
+  "rf-use": async () => { const m = S.modal, pick = m.tab === "pick" ? m.results[m.chosen] : m.preview; if (!pick) return; await chooseMatch(m.item.id, pick); closeModal(); toast("Saved. The TV picks it up within a couple of minutes."); },
+  "modal-ok": async () => { const m = S.modal; closeModal(); try { await m.run(); } catch (e) { toast("That didn't save: " + (e.message || e)); } },
+  "modal-close": closeModal,
+  "modal-bg": (el, e) => { if (e.target === el) closeModal(); },
+  set: el => { const k = el.dataset.key, v = el.type === "checkbox" ? el.checked : el.value; const cur = S.status?.current?.[k]; if (String(v) === String(cur)) delete S.pending[k]; else S.pending[k] = v; render(); },
+  sync: async () => {
+    const prev = (S.settings && (S.settings.version || 0) > (S.status?.appliedVersion || 0)) ? (S.settings.values || {}) : {};
+    await setDoc(uidRef("data", "settings"), { values: { ...prev, ...S.pending }, version: Date.now() });
+    S.pending = {}; toast("Sent. The TV applies it within a couple of minutes â€” or as soon as it's switched on.");
+  },
+  link: () => linkTv(document.getElementById("code").value),
+  "link-yes": async () => { const c = S.modal.code; closeModal(); S.linkParam = null; history.replaceState(null, "", location.pathname); await linkTv(c); },
+  "remove-tv": el => { S.modal = { type: "confirm", title: "Remove this TV?", body: "It stops syncing. You can link it again with a new code.", ok: "Remove",
+    run: async () => { await deleteDoc(uidRef("devices", el.dataset.id)); toast("Removed."); } }; render(); },
+};
+document.addEventListener("click", e => { const el = e.target.closest("[data-act]"); if (!el || el.tagName === "SELECT" || el.type === "checkbox" && el.dataset.act === "set") return; const f = A[el.dataset.act]; if (f) Promise.resolve(f(el, e)).catch(err => toast("Something went wrong: " + (err.message || err))); });
+document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort") { S.sort = el.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
+document.addEventListener("input", e => { if (e.target.id === "q") { S.q = e.target.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
+
+// ---------- start ----------
+if (configured) {
+  const app = initializeApp(FIREBASE_CONFIG); auth = getAuth(app); db = getFirestore(app);
+  onAuthStateChanged(auth, user => {
+    unsubs.forEach(u => u()); unsubs = []; S.user = user; S.ready = true;
+    if (user) {
+      const watch = (ref, fn) => unsubs.push(onSnapshot(ref, fn, err => console.warn("listen", err.code)));
+      watch(collection(db, "users", user.uid, "library"), s => { S.chunks = {}; s.forEach(d => S.chunks[d.id] = d.data()); render(); });
+      watch(uidRef("data", "overrides"), d => { S.overrides = d.exists() ? d.data() : {}; render(); });
+      watch(uidRef("data", "settings"), d => { S.settings = d.exists() ? d.data() : null; render(); });
+      watch(uidRef("data", "settingsStatus"), d => { S.status = d.exists() ? d.data() : null; render(); });
+      watch(collection(db, "users", user.uid, "devices"), s => { S.devices = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
+      if (S.linkParam) {
+        const code = S.linkParam.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+        getDoc(doc(db, "links", code)).then(s => { if (s.exists() && !s.data().claimedBy) { S.modal = { type: "link", code, name: s.data().deviceName }; render(); } }).catch(() => {});
+      }
+    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.view = "library"; }
+    render();
+  });
+}
+render();
+</script>
+</body>
+</html>
