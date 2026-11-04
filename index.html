@@ -70,6 +70,10 @@
   .modal { background:var(--panel); width:100%; max-width:560px; max-height:92vh; overflow:auto; border-radius:18px 18px 0 0; padding:1.2rem; }
   @media (min-width:700px) { .modal-bg { align-items:center; } .modal { border-radius:18px; } }
   .modal-x { position:fixed; top:14px; right:14px; z-index:21; width:44px; height:44px; border-radius:50%; border:0; background:rgba(40,32,30,.92); color:#fff; font-size:20px; line-height:1; cursor:pointer; box-shadow:0 2px 10px rgba(0,0,0,.5); }
+  .wbadge { position:absolute; left:6px; top:6px; background:rgba(111,207,151,.92); color:#07210f; font-size:.72rem; font-weight:700; padding:.1rem .45rem; border-radius:999px; }
+  .credit { color:var(--dim); font-size:.75rem; line-height:1.4; text-align:center; margin:2rem 0 5rem; }
+  .sect { margin:1.4rem 0 .6rem; font:700 1.05rem Georgia,serif; color:var(--gold); }
+  .grp { display:flex; align-items:center; gap:.5rem; color:var(--dim); font-size:.9rem; flex-basis:100%; }
   .tvpick { display:flex; gap:.5rem; overflow-x:auto; margin-bottom:.9rem; padding-bottom:.2rem; }
   .tvpick .btn { white-space:nowrap; flex:none; }
   .avatar-btn { background:none; border:0; padding:0; line-height:0; }
@@ -95,29 +99,35 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, reauthenticateWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, arrayUnion, arrayRemove, deleteField, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 // ---- Fill these in from the Firebase console (see SETUP.md). They are not secrets: ----
 // ---- the security rules, not these values, are what protect the data.               ----
 const FIREBASE_CONFIG = { apiKey:"AIzaSyDK2xcgZHZQ-dBLgEX4IDln-y388fvLIkI", authDomain:"projector-room.firebaseapp.com", projectId:"projector-room", appId:"1:283528306112:web:5491e49c77e8107e5a3c25" };
-const TMDB_KEY = "a0b6d45d97a2339d5424a444f38dfa6f"; // themoviedb.org API key (v3), used only to look up posters when fixing a match
+const TMDB_KEY = "f25b5746aeb9317ce258c0a72afb861f"; // themoviedb.org API key (v3), used only to look up posters when fixing a match
 
 const configured = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const root = document.getElementById("root");
+// Deleting from Drive needs the Drive API turned on first (see the notes). Flip to true when ready.
+const DELETE_ENABLED = false;
+const CREDIT = `<p class="credit">Film and series details and posters: This product uses the TMDB API but is not endorsed or certified by TMDB. Projector Room is a private app for personal, non-commercial use.</p>`;
 
 const S = {
   user: null, ready: false,
   chunks: {}, overrides: {}, settings: null, status: null, devices: [],
   view: "library", seriesId: null, selecting: false, sel: new Set(),
-  q: "", sort: "new", drawer: false, pending: {}, modal: null, toast: null,
+  q: "", sort: "new", filter: "all", group: true, drawer: false, pending: {}, modal: null, toast: null,
   linkParam: new URLSearchParams(location.search).get("link"),
+  prefs: (() => { try { return JSON.parse(localStorage.getItem("pr_prefs") || "{}"); } catch (e) { return {}; } })(),
   tv: (() => { try { return localStorage.getItem("pr_tv"); } catch (e) { return null; } })(), installEvt: null,
 };
 let auth, db, unsubs = [], toastTimer;
 
 // ---------- data helpers ----------
+const savePrefs = () => { try { localStorage.setItem("pr_prefs", JSON.stringify({ sort: S.sort, filter: S.filter, group: S.group })); } catch (e) {} };
+Object.assign(S, { sort: S.prefs.sort || "new", filter: S.prefs.filter || "all", group: S.prefs.group !== false });
 const uidRef = (...p) => doc(db, "users", S.user.uid, ...p);
 const hiddenSet = () => new Set(S.overrides.hidden || []);
 // The TV whose library is shown: the one picked last, else the first linked one.
@@ -142,6 +152,23 @@ function ago(ts) {
   if (s < 90) return "just now"; if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} hr ago`; return `${Math.round(s / 86400)} days ago`;
 }
+// "Watched" marks live in the same saved data as hides, so they survive signing out and in.
+const watchedSet = () => new Set(S.overrides.watched || []);
+function isW(id) {
+  const it = allItems().find(i => i.id === id), w = watchedSet();
+  if (it?.kind === "series" && it.episodes?.length) return it.episodes.every(e => w.has(e.id));
+  return w.has(id);
+}
+// A series is marked through all of its episodes.
+function watchIds(ids) {
+  const out = new Set();
+  for (const id of ids) { out.add(id); const it = allItems().find(i => i.id === id); if (it?.kind === "series") (it.episodes || []).forEach(e => out.add(e.id)); }
+  return [...out];
+}
+async function setWatched(ids, on) {
+  const all = watchIds(ids);
+  await merge(uidRef("data", "overrides"), { watched: on ? arrayUnion(...all) : arrayRemove(...all) });
+}
 const visibleEps = it => (it.episodes || []).filter(e => !hiddenSet().has(e.id));
 function toast(msg) { S.toast = msg; render(); clearTimeout(toastTimer); toastTimer = setTimeout(() => { S.toast = null; render(); }, 4000); }
 const names = (ids) => { const m = new Map(); allItems().forEach(i => { m.set(i.id, disp(i).title); (i.episodes || []).forEach(e => m.set(e.id, `${disp(i).title} ${epLabel(e)}`)); }); return ids.map(i => m.get(i) || i); };
@@ -160,6 +187,61 @@ function confirmHide(ids, then) {
     body: `${shown}${more}<p class="dim">They disappear from the TV but stay in Google Drive. You can bring them back any time from <b>Hidden</b>.</p>`,
     ok: "Hide", run: async () => { await hideIds(ids); S.sel.clear(); S.selecting = false; toast(`Hidden. The TV updates within a couple of minutes.`); if (then) then(); } };
   render();
+}
+
+// ---------- delete from Google Drive (moves files to Trash) ----------
+// Needs the full Drive permission, asked only when you actually delete, and only for this session.
+let driveTok = null;
+async function driveToken() {
+  if (driveTok && driveTok.exp > Date.now() + 60000) return driveTok.token;
+  const p = new GoogleAuthProvider(); p.addScope("https://www.googleapis.com/auth/drive"); p.setCustomParameters({ login_hint: S.user.email });
+  const r = await reauthenticateWithPopup(auth.currentUser, p);
+  const tok = GoogleAuthProvider.credentialFromResult(r)?.accessToken;
+  if (!tok) throw new Error("Google did not give permission to change Drive files.");
+  driveTok = { token: tok, exp: Date.now() + 50 * 60000 };
+  return tok;
+}
+async function trashFile(id, tok, trashed = true) {
+  const r = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(id)}?supportsAllDrives=true`,
+    { method: "PATCH", headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" }, body: JSON.stringify({ trashed }) });
+  if (r.ok) return null;
+  let msg = ""; try { msg = (await r.json()).error?.message || ""; } catch (e) {}
+  if (r.status === 404 || (r.status === 403 && /permission|forbidden|insufficient/i.test(msg))) return "this Google account can't change that file";
+  return msg || ("error " + r.status);
+}
+// A series becomes its episode files; a film is itself.
+function fileIds(ids) {
+  const out = new Set();
+  for (const id of ids) { const it = allItems().find(i => i.id === id); if (it && it.kind === "series") (it.episodes || []).forEach(e => out.add(e.id)); else out.add(id); }
+  return [...out];
+}
+// What the Deleted tab remembers about a file (episodes are labelled with their series).
+function infoFor(id) {
+  const at = Date.now();
+  for (const it of allItems()) {
+    if (it.id === id) { const d = disp(it); return { title: d.title, year: d.year || null, kind: it.kind, at }; }
+    const e = (it.episodes || []).find(x => x.id === id);
+    if (e) return { title: `${disp(it).title} ${epLabel(e)}`, year: null, kind: "episode", at };
+  }
+  return { title: id, year: null, kind: "file", at };
+}
+function confirmDelete(ids) {
+  const files = fileIds(ids), n = names(ids), shown = n.slice(0, 5).map(esc).join("<br>"), more = n.length > 5 ? `<br>…and ${n.length - 5} more` : "";
+  if (!files.length) return toast("There are no files to delete.");
+  S.modal = { type: "delete", ids, files, shown: shown + more, typed: files.length > 1, busy: false, progress: 0, error: null };
+  render();
+}
+
+// ---------- settings and refresh are kept per TV ----------
+let watchedTv = null, tvUnsubs = [];
+function watchTv() {
+  if (!S.user) return;
+  const id = curTv(); if (id === watchedTv) return;
+  tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = id; S.settings = null; S.status = null; S.pending = {};
+  if (!id) return;
+  const w = (ref, fn) => tvUnsubs.push(onSnapshot(ref, fn, err => console.warn("listen", err.code)));
+  w(uidRef("data", "settings_" + id), d => { S.settings = d.exists() ? d.data() : null; render(); });
+  w(uidRef("data", "settingsStatus_" + id), d => { S.status = d.exists() ? d.data() : null; render(); });
 }
 
 // ---------- TMDB ----------
@@ -204,7 +286,7 @@ function topbar() {
     <button class="avatar-btn" data-act="nav" data-v="tvs" aria-label="Linked TVs">${S.user.photoURL ? `<img class="avatar" src="${esc(S.user.photoURL)}" alt="">` : `<span class="avatar">${esc((S.user.displayName || S.user.email || "?")[0].toUpperCase())}</span>`}</button></div>`;
 }
 function tvPicker() {
-  if (S.devices.length < 2 || !["library", "hidden", "attention"].includes(S.view)) return "";
+  if (S.devices.length < 2 || !["library", "hidden", "attention", "settings"].includes(S.view)) return "";
   const cur = curTv();
   return `<div class="tvpick">${S.devices.map(d => `<button class="btn ${d.id === cur ? "gold" : "ghost"}" data-act="pick-tv" data-id="${esc(d.id)}">📺 ${esc(d.name || "TV")}</button>`).join("")}</div>`;
 }
@@ -217,7 +299,7 @@ function drawer() {
   const nav = (v, ico, label, n) => `<button class="nav ${S.view === v || (v === "library" && S.view === "series") ? "on" : ""}" data-act="nav" data-v="${v}">${ico} ${label}${n ? `<span class="n">${n}</span>` : ""}</button>`;
   return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
     <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
-    ${nav("library", "🎬", "Library")}${nav("hidden", "🙈", "Hidden", nHid)}${nav("attention", "⚠️", "Needs attention", nAtt)}
+    ${nav("library", "🎬", "Library")}${nav("hidden", "🙈", "Hidden", nHid)}${nav("deleted", "🗑️", "Deleted", Object.keys(S.overrides.deleted || {}).length)}${nav("attention", "⚠️", "Needs attention", nAtt)}
     ${nav("settings", "⚙️", "TV settings")}${nav("tvs", "📺", "Linked TVs")}
     ${installable() ? `<button class="nav" data-act="install">📲 Install app</button>` : ""}
     <button class="nav" data-act="signout">↩ Sign out</button></div>`;
@@ -226,7 +308,7 @@ function tile(it, opts = {}) {
   const d = disp(it), sel = S.sel.has(it.id);
   return `<div class="tile ${sel ? "sel" : ""} ${opts.dim ? "dim" : ""}" data-act="tile" data-id="${esc(it.id)}">
     <div class="poster">${d.poster ? `<img loading="lazy" src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}
-    ${it.kind === "series" ? `<span class="badge">${visibleEps(it).length} ep</span>` : ""}
+    ${it.kind === "series" ? `<span class="badge">${visibleEps(it).length} ep</span>` : ""}${isW(it.id) ? `<span class="wbadge">✓ Watched</span>` : ""}
     ${S.selecting ? `<span class="check">${sel ? "✓" : ""}</span>` : ""}</div>
     <div class="t">${esc(d.title)}</div><div class="y">${esc(d.year || "")}${it.kind === "series" ? " · series" : ""}</div></div>`;
 }
@@ -234,18 +316,36 @@ function libraryItems() {
   const hs = hiddenSet(), q = S.q.trim().toLowerCase();
   let items = allItems().filter(i => !hs.has(i.id) && (!(i.kind === "series" && i.episodes?.length && visibleEps(i).length === 0)));
   if (q) items = items.filter(i => disp(i).title.toLowerCase().includes(q));
-  items.sort(S.sort === "az" ? (a, b) => disp(a).title.localeCompare(disp(b).title) : (a, b) => String(b.added).localeCompare(String(a.added)));
+  if (S.filter === "unwatched") items = items.filter(i => !isW(i.id));
+  else if (S.filter === "watched") items = items.filter(i => isW(i.id));
+  const name = i => disp(i).title, added = i => String(i.added || "");
+  const by = {
+    new: (a, b) => added(b).localeCompare(added(a)),
+    old: (a, b) => added(a).localeCompare(added(b)),
+    opened: (a, b) => (b.lastOpened || 0) - (a.lastOpened || 0) || added(b).localeCompare(added(a)),
+    az: (a, b) => name(a).localeCompare(name(b)),
+    za: (a, b) => name(b).localeCompare(name(a)),
+  };
+  items.sort(by[S.sort] || by.new);
   return items;
 }
 function gridHtml() {
   const items = libraryItems();
   if (!allItems().length) return `<div class="card"><b>Nothing here yet.</b><p class="dim">Your TV uploads its film list a few seconds after it opens. If this TV isn't linked yet, open <b>Linked TVs</b> in the menu.</p></div>`;
-  return items.length ? `<div class="grid">${items.map(i => tile(i)).join("")}</div>` : `<p class="dim">No films match.</p>`;
+  if (!items.length) return `<p class="dim">${S.filter === "all" ? "No films match." : "Nothing matches this filter."}</p>`;
+  const grid = list => `<div class="grid">${list.map(i => tile(i)).join("")}</div>`;
+  if (!S.group) return grid(items);
+  const films = items.filter(i => i.kind !== "series"), series = items.filter(i => i.kind === "series");
+  const section = (title, list) => list.length ? `<h3 class="sect">${title} <span class="dim">${list.length}</span></h3>${grid(list)}` : "";
+  return section("🎬 Films", films) + section("📺 Series", series);
 }
 function libraryView() {
   return `<div class="tools"><input type="search" id="q" placeholder="Search" value="${esc(S.q)}">
-    <select id="sort"><option value="new" ${S.sort === "new" ? "selected" : ""}>Newest</option><option value="az" ${S.sort === "az" ? "selected" : ""}>A–Z</option></select>
-    <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select"}</button></div>
+    <select id="sort">${[["new", "Recently added"], ["old", "Oldest first"], ["opened", "Recently opened"], ["az", "A to Z"], ["za", "Z to A"]].map(([v, l]) => `<option value="${v}" ${S.sort === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <select id="filter">${[["all", "All"], ["unwatched", "Unwatched"], ["watched", "Watched"]].map(([v, l]) => `<option value="${v}" ${S.filter === v ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select"}</button>
+    <label class="grp"><input type="checkbox" id="grp" ${S.group ? "checked" : ""}> Films and series in separate sections</label>
+    <button class="btn ghost" data-act="refresh-tv" title="Ask the TV to rescan Google Drive now">↻ Refresh TV</button></div>
     <div id="gridbox">${gridHtml()}</div>`;
 }
 function seriesView() {
@@ -253,16 +353,28 @@ function seriesView() {
   const d = disp(it), hs = hiddenSet(), eps = it.episodes || [];
   return `<button class="btn ghost" data-act="back">← Library</button>
     <div class="head" style="margin-top:1rem"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
-    <div><h2>${esc(d.title)}</h2><div>${eps.length - eps.filter(e => hs.has(e.id)).length} of ${eps.length} episodes shown on the TV</div>
+    <div><h2>${esc(d.title)}</h2><div>${eps.length - eps.filter(e => hs.has(e.id)).length} of ${eps.length} episodes shown on the TV · ${eps.filter(e => isW(e.id)).length} watched</div>
     <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}</div>
-    <div class="actions"><button class="btn" data-act="hide-series">Hide series</button><button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
+    <div class="actions"><button class="btn" data-act="hide-series">Hide series</button><button class="btn" data-act="watch-series">${isW(it.id) ? "Mark series unwatched" : "Mark series watched"}</button>${DELETE_ENABLED ? `<button class="btn red" data-act="delete-series">Delete series</button>` : ""}<button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
     <button class="btn" data-act="refetch" data-id="${esc(it.id)}">Refetch details</button>
     <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select episodes"}</button></div></div></div>
     <div class="card">${eps.length ? eps.map(e => `<div class="row ${hs.has(e.id) ? "off" : ""}" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
       ${S.selecting ? `<input type="checkbox" ${S.sel.has(e.id) ? "checked" : ""} style="pointer-events:none">` : ""}
-      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
-      ${S.selecting ? "" : `<button class="btn ghost" data-act="${hs.has(e.id) ? "unhide-ep" : "hide-ep"}" data-id="${esc(e.id)}">${hs.has(e.id) ? "Unhide" : "Hide"}</button>`}
+      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}${isW(e.id) ? ` <span class="chip ok">Watched</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
+      ${S.selecting ? "" : `<button class="btn ghost" data-act="${hs.has(e.id) ? "unhide-ep" : "hide-ep"}" data-id="${esc(e.id)}">${hs.has(e.id) ? "Unhide" : "Hide"}</button> <button class="btn ${isW(e.id) ? "gold" : "ghost"}" data-act="watch-one" data-id="${esc(e.id)}" title="${isW(e.id) ? "Mark as unwatched" : "Mark as watched"}">✓</button> ${DELETE_ENABLED ? `<button class="btn ghost" data-act="delete-ep" data-id="${esc(e.id)}">Delete</button>` : ""}`}
     </div>`).join("") : `<p class="dim">No episode files were found in this series.</p>`}</div>`;
+}
+function deletedView() {
+  if (!DELETE_ENABLED) return `<div class="card"><b>Coming soon</b><p class="dim">Deleting films from Google Drive, and restoring them from here, is coming soon.</p></div>`;
+  const list = Object.entries(S.overrides.deleted || {}).map(([id, e]) => ({ id, ...e })).sort((a, b) => b.at - a.at);
+  const note = `<p class="dim" style="margin-top:1rem">Deleted files wait in your Google Drive <b>Trash</b> for 30 days, then Google removes them for good. Bring one back with <b>Restore</b> here, or open <a href="https://drive.google.com/drive/trash" target="_blank" rel="noopener" style="color:var(--gold)">drive.google.com → Trash</a> and choose Restore there.</p>`;
+  if (!list.length) return `<div class="card"><b>Nothing deleted.</b><p class="dim">Files you delete from here appear in this list, with the days left to restore them.</p></div>${note}`;
+  return `<div class="card">${list.map(e => {
+    const left = 30 - Math.floor((Date.now() - e.at) / 86400000), gone = left <= 0;
+    return `<div class="row"><div class="grow"><b>${esc(e.title || "File")}</b> <span class="dim">${esc(e.year || "")}</span>
+      <div class="sub">${gone ? `<span class="chip bad">Probably gone from Trash</span>` : `<span class="chip warn">${left} day${left === 1 ? "" : "s"} left to restore</span>`} deleted ${ago(e.at)}</div></div>
+      ${gone ? "" : `<button class="btn gold" data-act="restore-del" data-id="${esc(e.id)}">Restore</button>`} <button class="btn ghost" data-act="dismiss-del" data-id="${esc(e.id)}">Remove from list</button></div>`;
+  }).join("")}</div>${note}`;
 }
 function hiddenView() {
   const hs = hiddenSet(), items = allItems();
@@ -304,12 +416,12 @@ function curVal(k) {
   return S.status?.current?.[k];
 }
 function settingsView() {
-  if (!S.status?.schema) return `<div class="card"><b>Waiting for a TV.</b><p class="dim">Link a TV first (menu → Linked TVs). Its settings appear here once it has checked in.</p></div>`;
+  if (!S.status?.schema) return `<div class="card"><b>Waiting for this TV.</b><p class="dim">Link a TV first (menu → Linked TVs). Its settings appear here once it has checked in. The TV needs app version 0.29 or newer.</p></div>`;
   const groups = {}; S.status.schema.forEach(s => (groups[s.group] ||= []).push(s));
   const pend = Object.keys(S.pending).length, unapplied = S.settings && (S.settings.version || 0) > (S.status.appliedVersion || 0);
   const seen = S.devices.map(d => d.lastSeen).filter(Boolean).sort((a, b) => b.toMillis() - a.toMillis())[0];
   const chip = pend ? `<span class="chip warn">${pend} unsynced change${pend > 1 ? "s" : ""}</span>` : unapplied ? `<span class="chip warn">Waiting for the TV… (last seen ${ago(seen)})</span>` : `<span class="chip ok">Synced ✓</span>`;
-  return `<p class="dim">These are the settings of your linked TV. Change what you like, then press <b>Sync to TV</b>. If the TV is off, it applies them when it next starts.</p>
+  return `<p class="dim">These are the settings of ${esc(S.devices.find(d => d.id === curTv())?.name || "your TV")}. Each TV has its own. Change what you like, then press <b>Sync to TV</b>. If the TV is off, it applies them when it next starts.</p>
     ${Object.entries(groups).map(([g, list]) => `<h3>${esc(g)}</h3><div class="card">${list.map(s => {
       const v = curVal(s.key), changed = s.key in S.pending;
       const ctl = s.type === "bool" ? `<input type="checkbox" class="tog" data-act="set" data-key="${esc(s.key)}" ${v ? "checked" : ""}>` :
@@ -329,7 +441,7 @@ function selbar() {
   if (!S.selecting || !["library", "series", "hidden"].includes(S.view)) return "";
   const n = S.sel.size, hidden = S.view === "hidden";
   return `<div class="selbar"><span class="c">${n} selected</span><button class="btn ghost" data-act="select">Cancel</button>
-    <button class="btn ${hidden ? "gold" : "red"}" data-act="${hidden ? "unhide-sel" : "hide-sel"}" ${n ? "" : "disabled"}>${hidden ? "Unhide" : "Hide"} (${n})</button></div>`;
+    ${hidden ? "" : `<button class="btn" data-act="watch-sel" ${n ? "" : "disabled"}>${n && [...S.sel].every(isW) ? "Unwatched" : "Watched"} ✓</button>`}${hidden || !DELETE_ENABLED ? "" : `<button class="btn red" data-act="delete-sel" ${n ? "" : "disabled"}>Delete (${n})</button>`}<button class="btn ${hidden ? "gold" : "ghost"}" data-act="${hidden ? "unhide-sel" : "hide-sel"}" ${n ? "" : "disabled"}>${hidden ? "Unhide" : "Hide"} (${n})</button></div>`;
 }
 function modalHtml() {
   const m = S.modal; if (!m) return "";
@@ -343,7 +455,7 @@ function modalHtml() {
       <div class="sub dim" style="word-break:break-all;margin-top:.4rem">${esc(it.fileName || "")}</div></div></div>
       <div class="btns" style="justify-content:flex-start"><button class="btn" data-act="hide-one" data-id="${esc(it.id)}">Hide</button><button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
       <button class="btn" data-act="refetch" data-id="${esc(it.id)}">Refetch details</button>${d.chosen ? `<button class="btn ghost" data-act="reset-match" data-id="${esc(it.id)}">Back to automatic</button>` : ""}
-      <button class="btn ghost" data-act="modal-close">Close</button></div>`;
+      <button class="btn" data-act="watch-one" data-id="${esc(it.id)}">${isW(it.id) ? "Mark as unwatched" : "Mark as watched"}</button>${DELETE_ENABLED ? `<button class="btn red" data-act="delete-one" data-id="${esc(it.id)}">Delete from Drive</button>` : ""}<button class="btn ghost" data-act="modal-close">Close</button></div>`;
   } else if (m.type === "rename") {
     inner = `<h3>Rename</h3><p class="dim">Changes the name shown on the TV. The file in Google Drive keeps its name.</p>
       <input class="txt" id="rn" style="width:100%" value="${esc(m.value)}"><div class="btns">${m.hasOverride ? `<button class="btn ghost" data-act="rename-reset">Use original name</button>` : ""}
@@ -361,6 +473,12 @@ function modalHtml() {
     }
     const pick = m.tab === "pick" ? (m.results || [])[m.chosen] : m.preview;
     inner += `<div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="rf-use" ${pick ? "" : "disabled"}>Use this</button></div>`;
+  } else if (m.type === "delete") {
+    inner = `<h3>Delete from Google Drive?</h3><div>${m.shown}</div>
+      <p class="dim">${m.files.length} file${m.files.length > 1 ? "s" : ""} will move to your Google Drive <b>Trash</b>, where you can restore ${m.files.length > 1 ? "them" : "it"} for about 30 days. ${m.files.length > 1 ? "They disappear" : "It disappears"} from the TV.</p>
+      ${m.typed ? `<p>Type <b>DELETE</b> to confirm:</p><input class="txt" id="dc" style="width:100%" autocomplete="off" autocapitalize="characters">` : ""}
+      ${m.error ? `<p class="chip bad">${esc(m.error)}</p>` : ""}
+      <div class="btns"><button class="btn ghost" data-act="modal-close" ${m.busy ? "disabled" : ""}>Cancel</button><button class="btn red" data-act="delete-go" ${m.busy ? "disabled" : ""}>${m.busy ? `Deleting… ${m.progress}/${m.files.length}` : "Move to Trash"}</button></div>`;
   } else if (m.type === "tvname") {
     inner = `<h3>Rename this TV</h3><p class="dim">Only changes the name shown here.</p><input class="txt" id="tn" style="width:100%" maxlength="40" value="${esc(m.value)}">
       <div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="tvname-save">Save</button></div>`;
@@ -378,13 +496,13 @@ function render() {
   if (!S.user) {
     root.innerHTML = `<div class="center"><div class="logo">Projector Room</div><p class="dim">Manage your SS Talkies library from your phone:<br>hide, rename and fix films, and change your TV's settings.</p>
       <button class="btn gold" data-act="signin" style="font-size:1.05rem;padding:.8rem 1.6rem">Sign in with Google</button>
-      ${S.linkParam ? `<p class="dim">Sign in to link the TV that showed code <b>${esc(S.linkParam)}</b>.</p>` : ""}</div>${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+      ${S.linkParam ? `<p class="dim">Sign in to link the TV that showed code <b>${esc(S.linkParam)}</b>.</p>` : ""}${CREDIT}</div>${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
     return;
   }
-  const views = { library: libraryView, series: seriesView, hidden: hiddenView, attention: attentionView, settings: settingsView, tvs: tvsView };
-  const titles = { library: "Library", series: "Series", hidden: "Hidden", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
+  const views = { library: libraryView, series: seriesView, hidden: hiddenView, deleted: deletedView, attention: attentionView, settings: settingsView, tvs: tvsView };
+  const titles = { library: "Library", series: "Series", hidden: "Hidden", deleted: "Deleted", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
   const scrollY = window.scrollY;
-  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${views[S.view]()}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${views[S.view]()}${CREDIT}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
   window.scrollTo(0, scrollY);
 }
 
@@ -398,7 +516,13 @@ function openRefetch(item) {
 }
 const A = {
   signin: async () => { try { await signInWithPopup(auth, new GoogleAuthProvider()); } catch (e) { toast("Sign-in didn't finish: " + (e.code || e.message)); } },
-  signout: () => { S.drawer = false; signOut(auth); },
+  // Asked twice on purpose, so one stray tap in the menu can't sign you out.
+  signout: () => {
+    S.drawer = false;
+    S.modal = { type: "confirm", title: "Sign out?", body: "You'll need to sign in with Google again to manage your TVs.", ok: "Sign out",
+      run: async () => { S.modal = { type: "confirm", title: "Are you sure?", body: "Last check: sign out of Projector Room on this device?", ok: "Yes, sign out", run: async () => { signOut(auth); } }; render(); } };
+    render();
+  },
   drawer: () => { S.drawer = !S.drawer; render(); },
   nav: el => { S.view = el.dataset.v; S.drawer = false; S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
   back: () => { S.view = "library"; S.selecting = false; S.sel.clear(); render(); },
@@ -439,12 +563,50 @@ const A = {
   set: el => { const k = el.dataset.key, v = el.type === "checkbox" ? el.checked : el.value; const cur = S.status?.current?.[k]; if (String(v) === String(cur)) delete S.pending[k]; else S.pending[k] = v; render(); },
   sync: async () => {
     const prev = (S.settings && (S.settings.version || 0) > (S.status?.appliedVersion || 0)) ? (S.settings.values || {}) : {};
-    await setDoc(uidRef("data", "settings"), { values: { ...prev, ...S.pending }, version: Date.now() });
+    await setDoc(uidRef("data", "settings_" + curTv()), { values: { ...prev, ...S.pending }, version: Date.now(), ...(S.settings?.refreshAt ? { refreshAt: S.settings.refreshAt } : {}) });
     S.pending = {}; toast("Sent. The TV applies it within a couple of minutes — or as soon as it's switched on.");
   },
   link: () => linkTv(document.getElementById("code").value),
   "link-yes": async () => { const c = S.modal.code; closeModal(); S.linkParam = null; history.replaceState(null, "", location.pathname); await linkTv(c); },
-  "pick-tv": el => { S.tv = el.dataset.id; try { localStorage.setItem("pr_tv", S.tv); } catch (e) {} S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
+  "watch-one": async el => { const id = el.dataset.id, on = !isW(id); S.modal = null; await setWatched([id], on); toast(on ? "Marked as watched." : "Marked as unwatched."); },
+  "watch-series": async () => { const on = !isW(S.seriesId); await setWatched([S.seriesId], on); toast(on ? "Whole series marked as watched." : "Whole series marked as unwatched."); },
+  "watch-sel": async () => { const ids = [...S.sel]; if (!ids.length) return; const on = !ids.every(isW); await setWatched(ids, on); S.sel.clear(); S.selecting = false; toast(on ? "Marked as watched." : "Marked as unwatched."); },
+  "delete-one": el => confirmDelete([el.dataset.id]),
+  "delete-ep": el => confirmDelete([el.dataset.id]),
+  "delete-series": () => confirmDelete([S.seriesId]),
+  "delete-sel": () => confirmDelete([...S.sel]),
+  "delete-go": async () => {
+    const m = S.modal; if (!m || m.busy) return;
+    if (m.typed && (document.getElementById("dc")?.value || "").trim().toUpperCase() !== "DELETE") { m.error = "Type DELETE to confirm."; return render(); }
+    m.busy = true; m.error = null; m.progress = 0; render();
+    let tok;
+    try { tok = await driveToken(); } catch (e) { m.busy = false; m.error = "Couldn't get permission: " + (e.code || e.message); return render(); }
+    const meta = Object.fromEntries(m.files.map(id => [id, infoFor(id)]));
+    const done = [], failed = []; let next = 0;
+    const worker = async () => { while (next < m.files.length) { const id = m.files[next++]; const err = await trashFile(id, tok); (err ? failed.push(err) : done.push(id)); m.progress++; if (S.modal === m) render(); } };
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    // Hiding them too makes the TV drop them straight away instead of at its next full reload.
+    // ...and the Deleted tab keeps a record so they can be restored while Drive still has them.
+    if (done.length) await merge(uidRef("data", "overrides"), { hidden: arrayUnion(...done), deleted: Object.fromEntries(done.map(id => [id, meta[id]])) });
+    S.sel.clear(); S.selecting = false;
+    if (S.view === "series" && !allItems().some(i => i.id === S.seriesId && visibleEps(i).length)) S.view = "library";
+    closeModal();
+    toast(failed.length ? `Moved ${done.length} to Trash. ${failed.length} couldn't be deleted: ${[...new Set(failed)][0]}.` : `Moved ${done.length} file${done.length > 1 ? "s" : ""} to Google Drive Trash.`);
+  },
+  "restore-del": async el => {
+    const id = el.dataset.id, tok = await driveToken();
+    const err = await trashFile(id, tok, false);
+    if (err) return toast("Couldn't restore: " + err + ". It may have been removed from Trash already.");
+    await merge(uidRef("data", "overrides"), { hidden: arrayRemove(id), deleted: { [id]: deleteField() } });
+    toast("Restored to Google Drive. It comes back on the TV within a minute.");
+  },
+  "dismiss-del": async el => { await merge(uidRef("data", "overrides"), { deleted: { [el.dataset.id]: deleteField() } }); },
+  "refresh-tv": async () => {
+    const id = curTv(); if (!id) return toast("Link a TV first.");
+    await merge(uidRef("data", "settings_" + id), { refreshAt: Date.now() });
+    toast("Asked the TV to rescan Google Drive. New films appear here within a minute.");
+  },
+  "pick-tv": el => { S.tv = el.dataset.id; watchTv(); try { localStorage.setItem("pr_tv", S.tv); } catch (e) {} S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
   "rename-tv": el => { const d = S.devices.find(x => x.id === el.dataset.id); S.modal = { type: "tvname", id: el.dataset.id, value: d?.name || "" }; render(); },
   "tvname-save": async () => { const id = S.modal.id, v = document.getElementById("tn").value.trim(); if (!v) return; await merge(uidRef("devices", id), { name: v }); closeModal(); toast("Renamed."); },
   install: async () => {
@@ -456,7 +618,7 @@ const A = {
     run: async () => { await deleteDoc(uidRef("devices", el.dataset.id)); toast("Removed."); } }; render(); },
 };
 document.addEventListener("click", e => { const el = e.target.closest("[data-act]"); if (!el || el.tagName === "SELECT" || el.type === "checkbox" && el.dataset.act === "set") return; const f = A[el.dataset.act]; if (f) Promise.resolve(f(el, e)).catch(err => toast("Something went wrong: " + (err.message || err))); });
-document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort") { S.sort = el.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
+document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort" || el.id === "filter" || el.id === "grp") { if (el.id === "sort") S.sort = el.value; else if (el.id === "filter") S.filter = el.value; else S.group = el.checked; savePrefs(); document.getElementById("gridbox").innerHTML = gridHtml(); } });
 document.addEventListener("input", e => { if (e.target.id === "q") { S.q = e.target.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
 
 // ---------- back button, install, offline shell ----------
@@ -480,15 +642,13 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 if (configured) {
   const app = initializeApp(FIREBASE_CONFIG); auth = getAuth(app); db = getFirestore(app);
   onAuthStateChanged(auth, user => {
-    unsubs.forEach(u => u()); unsubs = []; S.user = user; S.ready = true;
+    unsubs.forEach(u => u()); unsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null; S.user = user; S.ready = true;
     if (user) {
       if (history.state?.pr !== 1) history.pushState({ pr: 1 }, "");
       const watch = (ref, fn) => unsubs.push(onSnapshot(ref, fn, err => console.warn("listen", err.code)));
       watch(collection(db, "users", user.uid, "library"), s => { S.chunks = {}; s.forEach(d => S.chunks[d.id] = d.data()); render(); });
       watch(uidRef("data", "overrides"), d => { S.overrides = d.exists() ? d.data() : {}; render(); });
-      watch(uidRef("data", "settings"), d => { S.settings = d.exists() ? d.data() : null; render(); });
-      watch(uidRef("data", "settingsStatus"), d => { S.status = d.exists() ? d.data() : null; render(); });
-      watch(collection(db, "users", user.uid, "devices"), s => { S.devices = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
+      watch(collection(db, "users", user.uid, "devices"), s => { S.devices = s.docs.map(d => ({ id: d.id, ...d.data() })); watchTv(); render(); });
       if (S.linkParam) {
         const code = S.linkParam.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         getDoc(doc(db, "links", code)).then(s => { if (s.exists() && !s.data().claimedBy) { S.modal = { type: "link", code, name: s.data().deviceName }; render(); } }).catch(() => {});
