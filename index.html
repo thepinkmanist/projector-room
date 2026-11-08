@@ -100,7 +100,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import { getAuth, GoogleAuthProvider, signInWithPopup, reauthenticateWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
-import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, arrayUnion, arrayRemove, deleteField, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, Timestamp, arrayUnion, arrayRemove, deleteField, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 // ---- Fill these in from the Firebase console (see SETUP.md). They are not secrets: ----
 // ---- the security rules, not these values, are what protect the data.               ----
@@ -116,7 +116,7 @@ const CREDIT = `<p class="credit">Film and series details and posters: This prod
 
 const S = {
   user: null, ready: false,
-  chunks: {}, overrides: {}, settings: null, status: null, devices: [],
+  space: null, joined: [], members: [], chunks: {}, overrides: {}, settings: null, status: null, devices: [],
   view: "library", seriesId: null, selecting: false, sel: new Set(),
   q: "", sort: "new", filter: "all", group: true, drawer: false, pending: {}, modal: null, toast: null,
   linkParam: new URLSearchParams(location.search).get("link"),
@@ -128,7 +128,10 @@ let auth, db, unsubs = [], toastTimer;
 // ---------- data helpers ----------
 const savePrefs = () => { try { localStorage.setItem("pr_prefs", JSON.stringify({ sort: S.sort, filter: S.filter, group: S.group })); } catch (e) {} };
 Object.assign(S, { sort: S.prefs.sort || "new", filter: S.prefs.filter || "all", group: S.prefs.group !== false });
-const uidRef = (...p) => doc(db, "users", S.user.uid, ...p);
+// The space being managed: your own, or one you were invited to. Linking a TV always goes into your own.
+const uidRef = (...p) => doc(db, "users", S.space || S.user.uid, ...p);
+const ownRef = (...p) => doc(db, "users", S.user.uid, ...p);
+const ownSpace = () => !S.space || S.space === S.user.uid;
 const hiddenSet = () => new Set(S.overrides.hidden || []);
 // The TV whose library is shown: the one picked last, else the first linked one.
 const curTv = () => S.devices.some(d => d.id === S.tv) ? S.tv : (S.devices[0]?.id || null);
@@ -233,7 +236,30 @@ function confirmDelete(ids) {
 }
 
 // ---------- settings and refresh are kept per TV ----------
-let watchedTv = null, tvUnsubs = [];
+let watchedTv = null, tvUnsubs = [], spaceUnsubs = [];
+function startSpaceWatchers() {
+  spaceUnsubs.forEach(u => u()); spaceUnsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null;
+  Object.assign(S, { chunks: {}, overrides: {}, devices: [], members: [], settings: null, status: null });
+  if (!S.user) return;
+  const space = S.space || S.user.uid;
+  const denied = err => {
+    console.warn("listen", err.code);
+    if (err.code === "permission-denied" && space !== S.user.uid) {
+      deleteDoc(ownRef("joined", space)).catch(() => {}); setSpace(S.user.uid); toast("You no longer have access to that person's TVs.");
+    }
+  };
+  const w = (ref, fn) => spaceUnsubs.push(onSnapshot(ref, fn, denied));
+  w(collection(db, "users", space, "library"), s => { S.chunks = {}; s.forEach(d => S.chunks[d.id] = d.data()); render(); });
+  w(doc(db, "users", space, "data", "overrides"), d => { S.overrides = d.exists() ? d.data() : {}; render(); });
+  w(collection(db, "users", space, "devices"), s => { S.devices = s.docs.map(d => ({ id: d.id, ...d.data() })); watchTv(); render(); });
+  if (space === S.user.uid) w(collection(db, "users", space, "members"), s => { S.members = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
+}
+function setSpace(id) {
+  S.space = id; S.tv = null; S.view = "library"; S.selecting = false; S.sel.clear(); S.drawer = false; S.pending = {};
+  try { localStorage.setItem("pr_space", id); } catch (e) {}
+  startSpaceWatchers(); render();
+}
+const spaceName = id => id === S.user.uid ? "Your TVs" : ((S.joined.find(j => j.owner === id) || {}).name || (S.joined.find(j => j.owner === id) || {}).email || "Shared TVs");
 function watchTv() {
   if (!S.user) return;
   const id = curTv(); if (id === watchedTv) return;
@@ -273,8 +299,9 @@ async function linkTv(raw) {
     const l = snap.data();
     if (l.claimedBy) return toast("That code has already been used.");
     if (l.expiresAt.toDate() < new Date()) return toast("That code has expired. Press OK on the TV for a new one.");
-    await setDoc(uidRef("devices", l.deviceUid), { name: l.deviceName, kind: l.kind, ownerEmail: S.user.email, linkedAt: serverTimestamp() });
+    await setDoc(ownRef("devices", l.deviceUid), { name: l.deviceName, kind: l.kind, ownerEmail: S.user.email, linkedAt: serverTimestamp() });
     await updateDoc(ref, { claimedBy: S.user.uid });
+    if (!ownSpace()) setSpace(S.user.uid);
     S.view = "library"; S.drawer = false; render(); window.scrollTo(0, 0);
     toast(`Linked ${l.deviceName}. Its films show up here within a minute.`);
   } catch (e) { toast("Couldn't link: " + (e.message || e)); }
@@ -299,6 +326,7 @@ function drawer() {
   const nav = (v, ico, label, n) => `<button class="nav ${S.view === v || (v === "library" && S.view === "series") ? "on" : ""}" data-act="nav" data-v="${v}">${ico} ${label}${n ? `<span class="n">${n}</span>` : ""}</button>`;
   return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
     <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
+    ${S.joined.length ? `<div class="spaces">${[S.user.uid, ...S.joined.map(j => j.owner)].map(id => `<button class="nav ${(S.space || S.user.uid) === id ? "on" : ""}" data-act="space" data-id="${esc(id)}">👥 ${esc(spaceName(id))}</button>`).join("")}</div>` : ""}
     ${nav("library", "🎬", "Library")}${nav("hidden", "🙈", "Hidden", nHid)}${nav("deleted", "🗑️", "Deleted", Object.keys(S.overrides.deleted || {}).length)}${nav("attention", "⚠️", "Needs attention", nAtt)}
     ${nav("settings", "⚙️", "TV settings")}${nav("tvs", "📺", "Linked TVs")}
     ${installable() ? `<button class="nav" data-act="install">📲 Install app</button>` : ""}
@@ -433,9 +461,21 @@ function tvsView() {
   return `<div class="card"><b>Link a TV</b><p class="dim">On the TV: <b>Settings → Projector Room</b> shows a code. Type it here, or scan the TV's QR code.</p>
     <div class="tools"><input class="txt" id="code" placeholder="ABCD-EFGH" maxlength="9" value="${esc(S.linkParam || "")}" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px">
     <button class="btn gold" data-act="link">Link</button></div></div>
-    <h3>Your TVs</h3>${S.devices.length ? `<div class="card">${S.devices.map(d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
+    ${ownSpace() ? "" : `<div class="card"><b>You are managing ${esc(spaceName(S.space))}</b><p class="dim">You can manage their TVs here. To link a TV of your own, switch back to <b>Your TVs</b> in the menu first.</p><button class="btn ghost" data-act="leave-space">Leave this space</button></div>`}
+    <h3>${esc(spaceName(S.space || S.user.uid))}</h3>${S.devices.length ? `<div class="card">${S.devices.map(d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
       <div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")} · last seen ${ago(d.lastSeen)}${d.appVersion ? " · v" + esc(d.appVersion) : ""}</div></div>
-      <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}`;
+      <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}
+    ${ownSpace() ? shareBlock() : ""}
+    <div class="card" style="margin-top:1rem"><b>Join someone's TVs</b><p class="dim">Got an invite code from another person? Type it here to manage their TVs with your own Google sign-in.</p>
+    <div class="tools"><input class="txt" id="joincode" placeholder="CODE" maxlength="9" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px"><button class="btn gold" data-act="join">Join</button></div></div>`;
+}
+function shareBlock() {
+  const inv = S.invite && S.invite.expires > Date.now() ? S.invite : null;
+  return `<h3>People who can manage your TVs</h3><div class="card">
+    ${S.members.length ? S.members.map(m => `<div class="row"><div class="grow"><b>${esc(m.name || m.email || "Someone")}</b><div class="sub">${esc(m.email || "")}</div></div><button class="btn ghost" data-act="remove-member" data-id="${esc(m.id)}">Remove</button></div>`).join("") : `<p class="dim" style="margin:.2rem 0">Only you, so far.</p>`}
+    ${inv ? `<p style="margin:.8rem 0 .2rem">Give this code to the person (valid 30 minutes):</p><div style="font:700 1.8rem monospace;letter-spacing:.15em;color:var(--gold)">${esc(inv.code.slice(0, 4))}-${esc(inv.code.slice(4))}</div>` : ""}
+    <div class="btns" style="justify-content:flex-start"><button class="btn gold" data-act="invite">${inv ? "New code" : "Invite someone"}</button></div>
+    <p class="dim">They sign in with their own Google account and see and change the same films, hides and settings as you. They can't link new TVs into your space.</p></div>`;
 }
 function selbar() {
   if (!S.selecting || !["library", "series", "hidden"].includes(S.view)) return "";
@@ -453,7 +493,7 @@ function modalHtml() {
       <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}
       ${it.durationMs ? `<span class="chip">${fmtDur(it.durationMs)}</span>` : ""}${it.sizeMb != null ? `<span class="chip">${it.sizeMb} MB</span>` : ""}</div>
       <div class="sub dim" style="word-break:break-all;margin-top:.4rem">${esc(it.fileName || "")}</div></div></div>
-      <div class="btns" style="justify-content:flex-start"><button class="btn" data-act="hide-one" data-id="${esc(it.id)}">Hide</button><button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
+      <div class="btns" style="justify-content:flex-start">${hiddenSet().has(it.id) ? `<button class="btn gold" data-act="unhide-one" data-id="${esc(it.id)}">Unhide</button>` : `<button class="btn" data-act="hide-one" data-id="${esc(it.id)}">Hide</button>`}<button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
       <button class="btn" data-act="refetch" data-id="${esc(it.id)}">Refetch details</button>${d.chosen ? `<button class="btn ghost" data-act="reset-match" data-id="${esc(it.id)}">Back to automatic</button>` : ""}
       <button class="btn" data-act="watch-one" data-id="${esc(it.id)}">${isW(it.id) ? "Mark as unwatched" : "Mark as watched"}</button>${DELETE_ENABLED ? `<button class="btn red" data-act="delete-one" data-id="${esc(it.id)}">Delete from Drive</button>` : ""}<button class="btn ghost" data-act="modal-close">Close</button></div>`;
   } else if (m.type === "rename") {
@@ -530,12 +570,13 @@ const A = {
   tile: el => {
     const it = find(el.dataset.id); if (!it) return;
     if (S.selecting) { S.sel.has(it.id) ? S.sel.delete(it.id) : S.sel.add(it.id); render(); return; }
-    if (it.kind === "series" && S.view !== "attention") { S.seriesId = it.id; S.view = "series"; render(); window.scrollTo(0, 0); return; }
+    if (it.kind === "series" && S.view !== "attention" && S.view !== "hidden") { S.seriesId = it.id; S.view = "series"; render(); window.scrollTo(0, 0); return; }
     S.modal = { type: "sheet", item: it }; render();
   },
   epsel: el => { const id = el.dataset.id; S.sel.has(id) ? S.sel.delete(id) : S.sel.add(id); render(); },
   "hide-sel": () => confirmHide([...S.sel]),
   "unhide-sel": async () => { await unhideIds([...S.sel]); S.sel.clear(); S.selecting = false; toast("Unhidden."); },
+  "unhide-one": async el => { S.modal = null; await unhideIds([el.dataset.id]); toast("Unhidden. It returns on the TV within a minute."); },
   "hide-one": el => confirmHide([el.dataset.id]),
   "hide-series": () => confirmHide([S.seriesId], () => { S.view = "library"; }),
   "hide-ep": el => confirmHide([el.dataset.id]),
@@ -606,6 +647,28 @@ const A = {
     await merge(uidRef("data", "settings_" + id), { refreshAt: Date.now() });
     toast("Asked the TV to rescan Google Drive. New films appear here within a minute.");
   },
+  space: el => setSpace(el.dataset.id),
+  invite: async () => {
+    const A8 = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let code = ""; for (let i = 0; i < 8; i++) code += A8[Math.floor(Math.random() * A8.length)];
+    await setDoc(doc(db, "invites", code), { ownerUid: S.user.uid, ownerEmail: S.user.email, ownerName: S.user.displayName || "", expiresAt: Timestamp.fromMillis(Date.now() + 30 * 60000) });
+    S.invite = { code, expires: Date.now() + 30 * 60000 }; render();
+  },
+  join: async () => {
+    const code = String(document.getElementById("joincode").value || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    if (code.length !== 8) return toast("A code has 8 letters and numbers.");
+    const snap = await getDoc(doc(db, "invites", code));
+    if (!snap.exists()) return toast("That code isn't valid. Ask for a new one.");
+    const inv = snap.data();
+    if (inv.expiresAt.toDate() < new Date()) return toast("That code has expired. Ask for a new one.");
+    if (inv.ownerUid === S.user.uid) return toast("That's your own code.");
+    await setDoc(doc(db, "users", inv.ownerUid, "members", S.user.uid), { code, email: S.user.email, name: S.user.displayName || "", joinedAt: serverTimestamp() });
+    await setDoc(ownRef("joined", inv.ownerUid), { email: inv.ownerEmail || "", name: inv.ownerName || "" });
+    setSpace(inv.ownerUid); toast("Joined. You can now manage their TVs.");
+  },
+  "remove-member": el => { const m = S.members.find(x => x.id === el.dataset.id); S.modal = { type: "confirm", title: "Remove this person?", body: `${esc(m?.name || m?.email || "They")} will no longer be able to manage your TVs.`, ok: "Remove",
+    run: async () => { await deleteDoc(uidRef("members", el.dataset.id)); toast("Removed."); } }; render(); },
+  "leave-space": () => { const id = S.space; S.modal = { type: "confirm", title: "Leave this space?", body: "You will stop managing their TVs. They can invite you again.", ok: "Leave",
+    run: async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); setSpace(S.user.uid); toast("You left."); } }; render(); },
   "pick-tv": el => { S.tv = el.dataset.id; watchTv(); try { localStorage.setItem("pr_tv", S.tv); } catch (e) {} S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
   "rename-tv": el => { const d = S.devices.find(x => x.id === el.dataset.id); S.modal = { type: "tvname", id: el.dataset.id, value: d?.name || "" }; render(); },
   "tvname-save": async () => { const id = S.modal.id, v = document.getElementById("tn").value.trim(); if (!v) return; await merge(uidRef("devices", id), { name: v }); closeModal(); toast("Renamed."); },
@@ -642,18 +705,18 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 if (configured) {
   const app = initializeApp(FIREBASE_CONFIG); auth = getAuth(app); db = getFirestore(app);
   onAuthStateChanged(auth, user => {
-    unsubs.forEach(u => u()); unsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null; S.user = user; S.ready = true;
+    unsubs.forEach(u => u()); unsubs = []; spaceUnsubs.forEach(u => u()); spaceUnsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null; S.user = user; S.ready = true;
     if (user) {
       if (history.state?.pr !== 1) history.pushState({ pr: 1 }, "");
-      const watch = (ref, fn) => unsubs.push(onSnapshot(ref, fn, err => console.warn("listen", err.code)));
-      watch(collection(db, "users", user.uid, "library"), s => { S.chunks = {}; s.forEach(d => S.chunks[d.id] = d.data()); render(); });
-      watch(uidRef("data", "overrides"), d => { S.overrides = d.exists() ? d.data() : {}; render(); });
-      watch(collection(db, "users", user.uid, "devices"), s => { S.devices = s.docs.map(d => ({ id: d.id, ...d.data() })); watchTv(); render(); });
+      let saved = null; try { saved = localStorage.getItem("pr_space"); } catch (e) {}
+      S.space = saved || user.uid;
+      unsubs.push(onSnapshot(collection(db, "users", user.uid, "joined"), s => { S.joined = s.docs.map(d => ({ owner: d.id, ...d.data() })); render(); }, err => console.warn("listen", err.code)));
+      startSpaceWatchers();
       if (S.linkParam) {
         const code = S.linkParam.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         getDoc(doc(db, "links", code)).then(s => { if (s.exists() && !s.data().claimedBy) { S.modal = { type: "link", code, name: s.data().deviceName }; render(); } }).catch(() => {});
       }
-    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.view = "library"; }
+    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.joined = []; S.members = []; S.space = null; S.view = "library"; }
     render();
   });
 }
