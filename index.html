@@ -74,6 +74,8 @@
   .credit { color:var(--dim); font-size:.75rem; line-height:1.4; text-align:center; margin:2rem 0 5rem; }
   .sect { margin:1.4rem 0 .6rem; font:700 1.05rem Georgia,serif; color:var(--gold); }
   .grp { display:flex; align-items:center; gap:.5rem; color:var(--dim); font-size:.9rem; flex-basis:100%; }
+  .pbar { position:absolute; left:0; right:0; bottom:0; height:5px; background:rgba(0,0,0,.6); }
+  .pbar i { display:block; height:100%; background:var(--gold); }
   .tvpick { display:flex; gap:.5rem; overflow-x:auto; margin-bottom:.9rem; padding-bottom:.2rem; }
   .tvpick .btn { white-space:nowrap; flex:none; }
   .avatar-btn { background:none; border:0; padding:0; line-height:0; }
@@ -172,6 +174,11 @@ async function setWatched(ids, on) {
   const all = watchIds(ids);
   await merge(uidRef("data", "overrides"), { watched: on ? arrayUnion(...all) : arrayRemove(...all) });
 }
+// Progress the TV reports. From 90% a film counts as finished, so stopping at the credits still counts.
+const prog = x => Math.max(0, Math.min(1, x.progress || 0));
+const epDone = e => prog(e) >= 0.9;
+const tvDone = it => it.kind === "series" ? !!(it.episodes?.length && it.episodes.every(epDone)) : prog(it) >= 0.9;
+const seen = it => isW(it.id) || tvDone(it);
 const visibleEps = it => (it.episodes || []).filter(e => !hiddenSet().has(e.id));
 function toast(msg) { S.toast = msg; render(); clearTimeout(toastTimer); toastTimer = setTimeout(() => { S.toast = null; render(); }, 4000); }
 const names = (ids) => { const m = new Map(); allItems().forEach(i => { m.set(i.id, disp(i).title); (i.episodes || []).forEach(e => m.set(e.id, `${disp(i).title} ${epLabel(e)}`)); }); return ids.map(i => m.get(i) || i); };
@@ -336,7 +343,8 @@ function tile(it, opts = {}) {
   const d = disp(it), sel = S.sel.has(it.id);
   return `<div class="tile ${sel ? "sel" : ""} ${opts.dim ? "dim" : ""}" data-act="tile" data-id="${esc(it.id)}">
     <div class="poster">${d.poster ? `<img loading="lazy" src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}
-    ${it.kind === "series" ? `<span class="badge">${visibleEps(it).length} ep</span>` : ""}${isW(it.id) ? `<span class="wbadge">✓ Watched</span>` : ""}
+    ${it.kind === "series" ? `<span class="badge">${visibleEps(it).length} ep</span>` : ""}${isW(it.id) ? `<span class="wbadge">✓ Watched</span>` : tvDone(it) ? `<span class="wbadge">✓ Finished</span>` : ""}
+    ${it.kind !== "series" && prog(it) > 0.02 && prog(it) < 0.9 ? `<div class="pbar"><i style="width:${Math.round(prog(it) * 100)}%"></i></div>` : ""}
     ${S.selecting ? `<span class="check">${sel ? "✓" : ""}</span>` : ""}</div>
     <div class="t">${esc(d.title)}</div><div class="y">${esc(d.year || "")}${it.kind === "series" ? " · series" : ""}</div></div>`;
 }
@@ -344,8 +352,8 @@ function libraryItems() {
   const hs = hiddenSet(), q = S.q.trim().toLowerCase();
   let items = allItems().filter(i => !hs.has(i.id) && (!(i.kind === "series" && i.episodes?.length && visibleEps(i).length === 0)));
   if (q) items = items.filter(i => disp(i).title.toLowerCase().includes(q));
-  if (S.filter === "unwatched") items = items.filter(i => !isW(i.id));
-  else if (S.filter === "watched") items = items.filter(i => isW(i.id));
+  if (S.filter === "unwatched") items = items.filter(i => !seen(i));
+  else if (S.filter === "watched") items = items.filter(i => seen(i));
   const name = i => disp(i).title, added = i => String(i.added || "");
   const by = {
     new: (a, b) => added(b).localeCompare(added(a)),
@@ -381,14 +389,14 @@ function seriesView() {
   const d = disp(it), hs = hiddenSet(), eps = it.episodes || [];
   return `<button class="btn ghost" data-act="back">← Library</button>
     <div class="head" style="margin-top:1rem"><div class="poster">${d.poster ? `<img src="${esc(d.poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
-    <div><h2>${esc(d.title)}</h2><div>${eps.length - eps.filter(e => hs.has(e.id)).length} of ${eps.length} episodes shown on the TV · ${eps.filter(e => isW(e.id)).length} watched</div>
+    <div><h2>${esc(d.title)}</h2><div>${eps.length - eps.filter(e => hs.has(e.id)).length} of ${eps.length} episodes shown on the TV · ${eps.filter(e => isW(e.id) || epDone(e)).length} watched or finished</div>
     <div>${d.matched ? `<span class="chip ok">Matched</span>` : `<span class="chip bad">No match</span>`}${d.renamed ? `<span class="chip">Renamed</span>` : ""}${d.chosen ? `<span class="chip warn">Match chosen by you</span>` : ""}</div>
     <div class="actions"><button class="btn" data-act="hide-series">Hide series</button><button class="btn" data-act="watch-series">${isW(it.id) ? "Mark series unwatched" : "Mark series watched"}</button>${DELETE_ENABLED ? `<button class="btn red" data-act="delete-series">Delete series</button>` : ""}<button class="btn" data-act="rename" data-id="${esc(it.id)}">Rename</button>
     <button class="btn" data-act="refetch" data-id="${esc(it.id)}">Refetch details</button>
     <button class="btn ${S.selecting ? "gold" : ""}" data-act="select">${S.selecting ? "Done" : "Select episodes"}</button></div></div></div>
     <div class="card">${eps.length ? eps.map(e => `<div class="row ${hs.has(e.id) ? "off" : ""}" ${S.selecting ? `data-act="epsel" data-id="${esc(e.id)}"` : ""}>
       ${S.selecting ? `<input type="checkbox" ${S.sel.has(e.id) ? "checked" : ""} style="pointer-events:none">` : ""}
-      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}${isW(e.id) ? ` <span class="chip ok">Watched</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
+      <div class="grow"><b>${esc(epLabel(e))}</b> ${fmtDur(e.durationMs) ? `· ${fmtDur(e.durationMs)}` : ""}${hs.has(e.id) ? ` <span class="chip warn">Hidden</span>` : ""}${isW(e.id) ? ` <span class="chip ok">Watched</span>` : epDone(e) ? ` <span class="chip ok">Finished on TV</span>` : prog(e) > 0.02 ? ` <span class="chip">${Math.round(prog(e) * 100)}% watched</span>` : ""}<div class="sub">${esc(e.name)}</div></div>
       ${S.selecting ? "" : `<button class="btn ghost" data-act="${hs.has(e.id) ? "unhide-ep" : "hide-ep"}" data-id="${esc(e.id)}">${hs.has(e.id) ? "Unhide" : "Hide"}</button> <button class="btn ${isW(e.id) ? "gold" : "ghost"}" data-act="watch-one" data-id="${esc(e.id)}" title="${isW(e.id) ? "Mark as unwatched" : "Mark as watched"}">✓</button> ${DELETE_ENABLED ? `<button class="btn ghost" data-act="delete-ep" data-id="${esc(e.id)}">Delete</button>` : ""}`}
     </div>`).join("") : `<p class="dim">No episode files were found in this series.</p>`}</div>`;
 }
