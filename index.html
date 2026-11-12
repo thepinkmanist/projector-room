@@ -76,6 +76,14 @@
   .grp { display:flex; align-items:center; gap:.5rem; color:var(--dim); font-size:.9rem; flex-basis:100%; }
   .pbar { position:absolute; left:0; right:0; bottom:0; height:5px; background:rgba(0,0,0,.6); }
   .pbar i { display:block; height:100%; background:var(--gold); }
+  .on { color:var(--ok); }
+  .off { color:var(--dim); }
+  .dot { font-size:.7rem; }
+  #scanner { position:fixed; inset:0; z-index:40; background:#000; }
+  #scanner video { width:100%; height:100%; object-fit:cover; }
+  #scanner .scan-hint { position:absolute; left:0; right:0; bottom:2.5rem; text-align:center; color:#fff; text-shadow:0 1px 6px #000; padding:0 1rem; }
+  #scanner .scan-x { position:absolute; top:14px; right:14px; width:44px; height:44px; border-radius:50%; border:0; background:rgba(40,32,30,.92); color:#fff; font-size:20px; }
+  #scanner .scan-frame { position:absolute; left:50%; top:50%; width:min(70vw,320px); aspect-ratio:1; transform:translate(-50%,-50%); border:3px solid var(--gold); border-radius:18px; box-shadow:0 0 0 100vmax rgba(0,0,0,.45); }
   .tvpick { display:flex; gap:.5rem; overflow-x:auto; margin-bottom:.9rem; padding-bottom:.2rem; }
   .tvpick .btn { white-space:nowrap; flex:none; }
   .avatar-btn { background:none; border:0; padding:0; line-height:0; }
@@ -179,6 +187,12 @@ const prog = x => Math.max(0, Math.min(1, x.progress || 0));
 const epDone = e => prog(e) >= 0.9;
 const tvDone = it => it.kind === "series" ? !!(it.episodes?.length && it.episodes.every(epDone)) : prog(it) >= 0.9;
 const seen = it => isW(it.id) || tvDone(it);
+// A TV checks in every ~15 seconds while it is on, so a recent "last seen" means it is online.
+const seenMs = d => d.lastSeen?.toMillis ? d.lastSeen.toMillis() : 0;
+const isOnline = d => Date.now() - seenMs(d) < 75000;
+const statusHtml = d => isOnline(d) ? `<span class="on">● Online</span>` : `<span class="off">○ Offline · last seen ${ago(d.lastSeen)}</span>`;
+function tickStatus() { document.querySelectorAll("[data-ls]").forEach(el => { const d = S.devices.find(x => x.id === el.dataset.ls); if (d) el.innerHTML = statusHtml(d); }); }
+setInterval(tickStatus, 20000);
 const visibleEps = it => (it.episodes || []).filter(e => !hiddenSet().has(e.id));
 function toast(msg) { S.toast = msg; render(); clearTimeout(toastTimer); toastTimer = setTimeout(() => { S.toast = null; render(); }, 4000); }
 const names = (ids) => { const m = new Map(); allItems().forEach(i => { m.set(i.id, disp(i).title); (i.episodes || []).forEach(e => m.set(e.id, `${disp(i).title} ${epLabel(e)}`)); }); return ids.map(i => m.get(i) || i); };
@@ -297,7 +311,50 @@ async function candidates(item) {
 }
 
 // ---------- link a TV ----------
-async function linkTv(raw) {
+// Codes are shown as ABCD-EFGH; typing is forgiving: any case, any dashes or spaces.
+const fmtCode = v => { const c = String(v || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 8); return c.length > 4 ? c.slice(0, 4) + "-" + c.slice(4) : c; };
+
+// Camera scanner for the TV's QR code. It lives outside the page content so the
+// page re-drawing (which happens whenever data arrives) can't switch the camera off.
+let scanStream = null, scanRaf = 0;
+function stopScan() { cancelAnimationFrame(scanRaf); scanStream?.getTracks().forEach(t => t.stop()); scanStream = null; document.getElementById("scanner")?.remove(); }
+async function loadJsQr() {
+  if (window.jsQR) return;
+  await new Promise((res, rej) => { const el = document.createElement("script"); el.src = "https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"; el.onload = res; el.onerror = rej; document.head.appendChild(el); });
+}
+function codeFromScan(text) {
+  const m = String(text).match(/[?&]link=([A-Za-z0-9-]+)/i);
+  const raw = (m ? m[1] : String(text)).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  return raw.length === 8 ? raw : null;
+}
+async function openScanner() {
+  if (!navigator.mediaDevices?.getUserMedia) return toast("This browser can't use the camera. Type the code instead.");
+  const box = document.createElement("div"); box.id = "scanner";
+  box.innerHTML = `<video playsinline muted></video><div class="scan-frame"></div><div class="scan-hint">Point the camera at the QR code on the TV</div><button class="scan-x" aria-label="Close">&#10005;</button>`;
+  document.body.appendChild(box);
+  box.querySelector(".scan-x").onclick = stopScan;
+  try { scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } }); }
+  catch (e) { stopScan(); return toast("The camera wasn't allowed. Type the code instead."); }
+  const video = box.querySelector("video"); video.srcObject = scanStream; await video.play().catch(() => {});
+  const detector = "BarcodeDetector" in window ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+  if (!detector) { try { await loadJsQr(); } catch (e) { stopScan(); return toast("Couldn't load the scanner. Type the code instead."); } }
+  const canvas = document.createElement("canvas"), ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const tick = async () => {
+    if (!scanStream) return;
+    let text = null;
+    if (video.readyState >= 2) {
+      try {
+        if (detector) { const r = await detector.detect(video); text = r[0]?.rawValue || null; }
+        else { canvas.width = video.videoWidth; canvas.height = video.videoHeight; ctx.drawImage(video, 0, 0); const img = ctx.getImageData(0, 0, canvas.width, canvas.height); text = window.jsQR(img.data, img.width, img.height)?.data || null; }
+      } catch (e) {}
+    }
+    const code = text && codeFromScan(text);
+    if (code) { stopScan(); linkTv(code); return; }
+    scanRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+async function linkTv(raw, name) {
   const code = String(raw || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   if (code.length !== 8) return toast("A code has 8 letters and numbers.");
   try {
@@ -306,11 +363,13 @@ async function linkTv(raw) {
     const l = snap.data();
     if (l.claimedBy) return toast("That code has already been used.");
     if (l.expiresAt.toDate() < new Date()) return toast("That code has expired. Press OK on the TV for a new one.");
-    await setDoc(ownRef("devices", l.deviceUid), { name: l.deviceName, kind: l.kind, ownerEmail: S.user.email, linkedAt: serverTimestamp() });
+    // Ask for a name first, so two TVs on the same Drive are easy to tell apart.
+    if (name === undefined) { S.modal = { type: "linkname", code, value: l.deviceName || "" }; render(); return; }
+    await setDoc(ownRef("devices", l.deviceUid), { name: name, kind: l.kind, ownerEmail: S.user.email, linkedAt: serverTimestamp() });
     await updateDoc(ref, { claimedBy: S.user.uid });
     if (!ownSpace()) setSpace(S.user.uid);
     S.view = "library"; S.drawer = false; render(); window.scrollTo(0, 0);
-    toast(`Linked ${l.deviceName}. Its films show up here within a minute.`);
+    toast(`Linked ${name}. Its films show up here within a minute.`);
   } catch (e) { toast("Couldn't link: " + (e.message || e)); }
 }
 
@@ -322,7 +381,7 @@ function topbar() {
 function tvPicker() {
   if (S.devices.length < 2 || !["library", "hidden", "attention", "settings"].includes(S.view)) return "";
   const cur = curTv();
-  return `<div class="tvpick">${S.devices.map(d => `<button class="btn ${d.id === cur ? "gold" : "ghost"}" data-act="pick-tv" data-id="${esc(d.id)}">📺 ${esc(d.name || "TV")}</button>`).join("")}</div>`;
+  return `<div class="tvpick">${S.devices.map(d => `<button class="btn ${d.id === cur ? "gold" : "ghost"}" data-act="pick-tv" data-id="${esc(d.id)}"><span class="dot ${isOnline(d) ? "on" : "off"}">●</span> ${esc(d.name || "TV")}</button>`).join("")}</div>`;
 }
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -434,6 +493,9 @@ function attention() {
     else if (!d.poster) why.push("No poster");
     if (it.kind === "film" && it.tmdbId && !d.chosen && count[it.tmdbId] > 1) why.push("Possible duplicate");
     if (it.kind === "film" && it.sizeMb != null && it.sizeMb < 50) why.push("Very small file (a sample or trailer?)");
+    // AV1 needs a fast processor to play in software; Fire Sticks stutter on it. Spotted from the file name.
+    const isAv1 = n => /(^|[^a-z0-9])av1([^a-z0-9]|$)/i.test(n || "");
+    if (it.kind === "series" ? (it.episodes || []).some(e => isAv1(e.name)) : isAv1(it.fileName)) why.push("AV1 video: may stutter on Fire Sticks (try an HEVC or H.264 copy)");
     if (why.length) out.push({ it, why });
   }
   return out;
@@ -467,15 +529,15 @@ function settingsView() {
 }
 function tvsView() {
   return `<div class="card"><b>Link a TV</b><p class="dim">On the TV: <b>Settings → Projector Room</b> shows a code. Type it here, or scan the TV's QR code.</p>
-    <div class="tools"><input class="txt" id="code" placeholder="ABCD-EFGH" maxlength="9" value="${esc(S.linkParam || "")}" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px">
-    <button class="btn gold" data-act="link">Link</button></div></div>
+    <div class="tools"><input class="txt" id="code" placeholder="ABCD-EFGH" maxlength="9" value="${esc(fmtCode(S.linkParam))}" autocapitalize="characters" autocomplete="off" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px">
+    <button class="btn gold" data-act="link">Link</button><button class="btn" data-act="scan">📷 Scan QR</button></div></div>
     ${ownSpace() ? "" : `<div class="card"><b>You are managing ${esc(spaceName(S.space))}</b><p class="dim">You can manage their TVs here. To link a TV of your own, switch back to <b>Your TVs</b> in the menu first.</p><button class="btn ghost" data-act="leave-space">Leave this space</button></div>`}
     <h3>${esc(spaceName(S.space || S.user.uid))}</h3>${S.devices.length ? `<div class="card">${S.devices.map(d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
-      <div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")} · last seen ${ago(d.lastSeen)}${d.appVersion ? " · v" + esc(d.appVersion) : ""}</div></div>
+      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")}${d.appVersion ? " · v" + esc(d.appVersion) : ""} · ID ${esc(d.id.slice(-4))}</div></div>
       <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}
     ${ownSpace() ? shareBlock() : ""}
     <div class="card" style="margin-top:1rem"><b>Join someone's TVs</b><p class="dim">Got an invite code from another person? Type it here to manage their TVs with your own Google sign-in.</p>
-    <div class="tools"><input class="txt" id="joincode" placeholder="CODE" maxlength="9" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px"><button class="btn gold" data-act="join">Join</button></div></div>`;
+    <div class="tools"><input class="txt" id="joincode" placeholder="ABCD-EFGH" autocapitalize="characters" autocomplete="off" maxlength="9" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px"><button class="btn gold" data-act="join">Join</button></div></div>`;
 }
 function shareBlock() {
   const inv = S.invite && S.invite.expires > Date.now() ? S.invite : null;
@@ -530,8 +592,11 @@ function modalHtml() {
   } else if (m.type === "tvname") {
     inner = `<h3>Rename this TV</h3><p class="dim">Only changes the name shown here.</p><input class="txt" id="tn" style="width:100%" maxlength="40" value="${esc(m.value)}">
       <div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="tvname-save">Save</button></div>`;
+  } else if (m.type === "linkname") {
+    inner = `<h3>Name this TV</h3><p class="dim">Pick a name you will recognise, such as "Living room" or "Parents' TV".</p><input class="txt" id="ln" style="width:100%" maxlength="40" value="${esc(m.value)}">
+      <div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="linkname-save">Link TV</button></div>`;
   } else if (m.type === "link") {
-    inner = `<h3>Link this TV?</h3><p>${esc(m.name)} is showing the code <b>${esc(m.code)}</b>.</p><div class="btns"><button class="btn ghost" data-act="modal-close">Not now</button><button class="btn gold" data-act="link-yes">Link it</button></div>`;
+    inner = `<h3>Link this TV?</h3><p>${esc(m.name)} is showing the code <b>${esc(m.code)}</b>.</p><p class="dim">Give it a name you will recognise:</p><input class="txt" id="ln" style="width:100%" maxlength="40" value="${esc(m.name)}"><div class="btns"><button class="btn ghost" data-act="modal-close">Not now</button><button class="btn gold" data-act="link-yes">Link it</button></div>`;
   }
   return `<div class="modal-bg" data-act="modal-bg"><div class="modal">${inner}</div><button class="modal-x" data-act="modal-close" aria-label="Close">&#10005;</button></div>`;
 }
@@ -616,7 +681,8 @@ const A = {
     S.pending = {}; toast("Sent. The TV applies it within a couple of minutes — or as soon as it's switched on.");
   },
   link: () => linkTv(document.getElementById("code").value),
-  "link-yes": async () => { const c = S.modal.code; closeModal(); S.linkParam = null; history.replaceState(null, "", location.pathname); await linkTv(c); },
+  "link-yes": async () => { const c = S.modal.code, nm = (document.getElementById("ln")?.value || "").trim() || S.modal.name || "TV"; closeModal(); S.linkParam = null; history.replaceState(null, "", location.pathname); await linkTv(c, nm); },
+  "linkname-save": async () => { const c = S.modal.code, v = (document.getElementById("ln")?.value || "").trim(); if (!v) return; closeModal(); S.linkParam = null; history.replaceState(null, "", location.pathname); await linkTv(c, v); },
   "watch-one": async el => { const id = el.dataset.id, on = !isW(id); S.modal = null; await setWatched([id], on); toast(on ? "Marked as watched." : "Marked as unwatched."); },
   "watch-series": async () => { const on = !isW(S.seriesId); await setWatched([S.seriesId], on); toast(on ? "Whole series marked as watched." : "Whole series marked as unwatched."); },
   "watch-sel": async () => { const ids = [...S.sel]; if (!ids.length) return; const on = !ids.every(isW); await setWatched(ids, on); S.sel.clear(); S.selecting = false; toast(on ? "Marked as watched." : "Marked as unwatched."); },
@@ -677,6 +743,7 @@ const A = {
     run: async () => { await deleteDoc(uidRef("members", el.dataset.id)); toast("Removed."); } }; render(); },
   "leave-space": () => { const id = S.space; S.modal = { type: "confirm", title: "Leave this space?", body: "You will stop managing their TVs. They can invite you again.", ok: "Leave",
     run: async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); setSpace(S.user.uid); toast("You left."); } }; render(); },
+  scan: () => openScanner(),
   "pick-tv": el => { S.tv = el.dataset.id; watchTv(); try { localStorage.setItem("pr_tv", S.tv); } catch (e) {} S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
   "rename-tv": el => { const d = S.devices.find(x => x.id === el.dataset.id); S.modal = { type: "tvname", id: el.dataset.id, value: d?.name || "" }; render(); },
   "tvname-save": async () => { const id = S.modal.id, v = document.getElementById("tn").value.trim(); if (!v) return; await merge(uidRef("devices", id), { name: v }); closeModal(); toast("Renamed."); },
@@ -690,13 +757,14 @@ const A = {
 };
 document.addEventListener("click", e => { const el = e.target.closest("[data-act]"); if (!el || el.tagName === "SELECT" || el.type === "checkbox" && el.dataset.act === "set") return; const f = A[el.dataset.act]; if (f) Promise.resolve(f(el, e)).catch(err => toast("Something went wrong: " + (err.message || err))); });
 document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort" || el.id === "filter" || el.id === "grp") { if (el.id === "sort") S.sort = el.value; else if (el.id === "filter") S.filter = el.value; else S.group = el.checked; savePrefs(); document.getElementById("gridbox").innerHTML = gridHtml(); } });
-document.addEventListener("input", e => { if (e.target.id === "q") { S.q = e.target.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
+document.addEventListener("input", e => { if (e.target.id === "code" || e.target.id === "joincode") { const f = fmtCode(e.target.value); if (e.target.value !== f) e.target.value = f; return; } if (e.target.id === "q") { S.q = e.target.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
 
 // ---------- back button, install, offline shell ----------
 // Back opens the menu first (after closing anything open on top); pressing it again leaves.
 history.replaceState({ pr: 0 }, "");
 history.pushState({ pr: 1 }, "");
 addEventListener("popstate", () => {
+  if (document.getElementById("scanner")) { history.pushState({ pr: 1 }, ""); stopScan(); return; }
   if (!S.user) return;
   if (S.modal || S.selecting || S.view === "series" || !S.drawer) {
     history.pushState({ pr: 1 }, "");
