@@ -389,6 +389,17 @@ function topbar() {
   return `<div class="bar"><button class="icon" data-act="drawer" aria-label="Menu">☰</button><h1>Projector Room</h1>
     <button class="avatar-btn" data-act="nav" data-v="tvs" aria-label="Linked TVs">${S.user.photoURL ? `<img class="avatar" src="${esc(S.user.photoURL)}" alt="">` : `<span class="avatar">${esc((S.user.displayName || S.user.email || "?")[0].toUpperCase())}</span>`}</button></div>`;
 }
+// When this TV last reported its library. The lists on these pages come from that report,
+// so a film removed from Drive stays listed until the TV is on and reports again.
+function libStamp() {
+  if (!["library", "hidden", "attention"].includes(S.view)) return "";
+  const tv = curTv(); if (!tv) return "";
+  let at = 0;
+  for (const [cid, c] of Object.entries(S.chunks)) if (cid.startsWith(tv + "_") && c.updatedAt?.toMillis) at = Math.max(at, c.updatedAt.toMillis());
+  if (!at) return "";
+  const d = S.devices.find(x => x.id === tv), off = d && !isOnline(d);
+  return `<p class="dim" style="font-size:.8rem;margin:0 0 .8rem">Library reported ${ago(new Date(at))}.${off ? " This TV is offline, so changes in Google Drive show up after you turn it on and open the app." : ""}</p>`;
+}
 function tvPicker() {
   const all = allDevices();
   if (all.length < 2 || !["library", "hidden", "attention", "settings"].includes(S.view)) return "";
@@ -556,8 +567,8 @@ function settingsView() {
 function tvsView() {
   const own = S.user.uid, groups = [own, ...S.joined.map(j => j.owner)];
   const row = d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
-      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")}${d.appVersion ? " · v" + esc(d.appVersion) : ""} · ID ${esc(d.id.slice(-4))}</div></div>
-      <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Remove</button></div>`;
+      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")}${d.appVersion ? " · v" + esc(d.appVersion) : ""} · ID ${esc(d.id.slice(-4))}</div>
+      <div class="actions"><button class="btn gold" data-act="refresh-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">↻ Sync library</button><button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Rename</button><button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Remove</button></div></div></div>`;
   const list = groups.map(sp => {
     const devs = S.allDevs[sp] || [];
     if (sp === own && !devs.length && groups.length === 1) return "";
@@ -651,7 +662,7 @@ function render() {
   const views = { library: libraryView, series: seriesView, hidden: hiddenView, deleted: deletedView, attention: attentionView, settings: settingsView, tvs: tvsView };
   const titles = { library: "Library", series: "Series", hidden: "Hidden", deleted: "Deleted", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
   const scrollY = window.scrollY;
-  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${views[S.view]()}${CREDIT}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${libStamp()}${views[S.view]()}${CREDIT}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
   window.scrollTo(0, scrollY);
 }
 
@@ -763,10 +774,15 @@ const A = {
     toast("Restored to Google Drive. It comes back on the TV within a minute.");
   },
   "dismiss-del": async el => { await merge(uidRef("data", "overrides"), { deleted: { [el.dataset.id]: deleteField() } }); },
-  "refresh-tv": async () => {
-    const id = curTv(); if (!id) return toast("Link a TV first.");
-    await merge(uidRef("data", "settings_" + id), { refreshAt: Date.now() });
-    toast("Asked the TV to rescan Google Drive. New films appear here within a minute.");
+  "refresh-tv": async el => {
+    // From a TV's row on Linked TVs it targets that TV; from the Library button, the TV selected there.
+    const id = el?.dataset?.id || curTv(), sp = el?.dataset?.sp || S.space || S.user.uid;
+    if (!id) return toast("Link a TV first.");
+    const d = allDevices().find(x => x.id === id && x.space === sp);
+    await merge(doc(db, "users", sp, "data", "settings_" + id), { refreshAt: Date.now() });
+    toast(d && !isOnline(d)
+      ? `${d.name || "The TV"} is offline. It rescans Google Drive when it is switched on and the app is open.`
+      : `Asked ${d?.name || "the TV"} to rescan Google Drive. Its library updates here within a minute.`);
   },
   space: el => setSpace(el.dataset.id),
   invite: async () => {
