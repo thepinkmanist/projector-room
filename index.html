@@ -84,6 +84,10 @@
   #scanner .scan-hint { position:absolute; left:0; right:0; bottom:2.5rem; text-align:center; color:#fff; text-shadow:0 1px 6px #000; padding:0 1rem; }
   #scanner .scan-x { position:absolute; top:14px; right:14px; width:44px; height:44px; border-radius:50%; border:0; background:rgba(40,32,30,.92); color:#fff; font-size:20px; }
   #scanner .scan-frame { position:absolute; left:50%; top:50%; width:min(70vw,320px); aspect-ratio:1; transform:translate(-50%,-50%); border:3px solid var(--gold); border-radius:18px; box-shadow:0 0 0 100vmax rgba(0,0,0,.45); }
+  .popups { position:fixed; top:68px; left:0; right:0; z-index:30; display:flex; flex-direction:column; gap:.5rem; padding:0 .8rem; pointer-events:none; }
+  .popup { pointer-events:auto; display:flex; align-items:center; gap:.7rem; background:var(--panel); border:1px solid var(--gold); border-radius:14px; padding:.8rem 1rem; box-shadow:0 6px 24px rgba(0,0,0,.6); }
+  .popup .grow { flex:1; }
+  .popup button { background:none; border:0; color:var(--dim); font-size:1.1rem; }
   .tvpick { display:flex; gap:.5rem; overflow-x:auto; margin-bottom:.9rem; padding-bottom:.2rem; }
   .tvpick .btn { white-space:nowrap; flex:none; }
   .avatar-btn { background:none; border:0; padding:0; line-height:0; }
@@ -126,7 +130,7 @@ const CREDIT = `<p class="credit">Film and series details and posters: This prod
 
 const S = {
   user: null, ready: false,
-  space: null, joined: [], members: [], allDevs: {}, chunks: {}, overrides: {}, settings: null, status: null, devices: [],
+  space: null, joined: [], members: [], allDevs: {}, notesBy: {}, popups: [], chunks: {}, overrides: {}, settings: null, status: null, devices: [],
   view: "library", seriesId: null, selecting: false, sel: new Set(),
   q: "", sort: "new", filter: "all", group: true, drawer: false, pending: {}, modal: null, toast: null,
   linkParam: new URLSearchParams(location.search).get("link"),
@@ -264,11 +268,30 @@ function startAllDeviceWatchers() {
   if (!S.user) return;
   const spaces = [S.user.uid, ...S.joined.map(j => j.owner)];
   S.allDevs = Object.fromEntries(Object.entries(S.allDevs).filter(([k]) => spaces.includes(k)));
+  S.notesBy = Object.fromEntries(Object.entries(S.notesBy).filter(([k]) => spaces.includes(k)));
   for (const sp of spaces) {
     devUnsubs.push(onSnapshot(collection(db, "users", sp, "devices"),
       s => { S.allDevs[sp] = s.docs.map(d => ({ id: d.id, space: sp, ...d.data() })); render(); },
       err => { if (err.code === "permission-denied" && sp !== S.user.uid) deleteDoc(ownRef("joined", sp)).catch(() => {}); }));
+    let first = true;
+    devUnsubs.push(onSnapshot(collection(db, "users", sp, "notifications"), s => {
+      S.notesBy[sp] = s.docs.map(d => ({ id: d.id, space: sp, ...d.data() }));
+      // After the first load, anything newly added is announced with a pop-up.
+      if (!first) s.docChanges().filter(c => c.type === "added").forEach(c => announce({ id: c.doc.id, space: sp, ...c.doc.data() }));
+      first = false; render();
+    }, () => {}));
   }
+}
+const isMuted = tvId => !!allDevices().find(d => d.id === tvId)?.muted;
+const allNotes = () => Object.values(S.notesBy).flat().filter(n => !isMuted(n.tvId)).sort((a, b) => (b.at?.toMillis?.() || 0) - (a.at?.toMillis?.() || 0));
+const noteText = n => `${n.title || "A film"} was watched completely`;
+const noteTv = n => allDevices().find(d => d.id === n.tvId)?.name || "a TV";
+function announce(n) {
+  if (isMuted(n.tvId)) return;
+  S.popups.push(n); render();
+  setTimeout(() => { S.popups = S.popups.filter(x => x !== n); render(); }, 15000);
+  // Also a phone notification when this page is open in the background and allowed to show them.
+  try { if ("Notification" in window && Notification.permission === "granted" && document.hidden) new Notification("Projector Room", { body: `${noteText(n)} on ${noteTv(n)}`, icon: "icon-192.png" }); } catch (e) {}
 }
 function startSpaceWatchers() {
   spaceUnsubs.forEach(u => u()); spaceUnsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null;
@@ -416,6 +439,7 @@ function drawer() {
   return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
     <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
     ${nav("library", "🎬", "Library")}${nav("hidden", "🙈", "Hidden", nHid)}${nav("deleted", "🗑️", "Deleted", Object.keys(S.overrides.deleted || {}).length)}${nav("attention", "⚠️", "Needs attention", nAtt)}
+    ${nav("notifications", "🔔", "Notifications", allNotes().length)}
     ${nav("settings", "⚙️", "TV settings")}${nav("tvs", "📺", "Linked TVs")}
     ${installable() ? `<button class="nav" data-act="install">📲 Install app</button>` : ""}
     <button class="nav" data-act="signout">↩ Sign out</button></div>`;
@@ -493,6 +517,20 @@ function deletedView() {
       ${gone ? "" : `<button class="btn gold" data-act="restore-del" data-id="${esc(e.id)}">Restore</button>`} <button class="btn ghost" data-act="dismiss-del" data-id="${esc(e.id)}">Remove from list</button></div>`;
   }).join("")}</div>${note}`;
 }
+function notificationsView() {
+  const list = allNotes();
+  const perm = "Notification" in window ? Notification.permission : "unsupported";
+  const ask = perm === "default" ? `<div class="btns" style="justify-content:flex-start;margin:0 0 1rem"><button class="btn" data-act="allow-alerts">🔔 Allow alerts on this phone</button></div>` : "";
+  const mutedNames = allDevices().filter(d => d.muted).map(d => d.name || "TV");
+  const hint = `${mutedNames.length ? `<p class="dim" style="font-size:.85rem">Muted: ${esc(mutedNames.join(", "))}. Unmute in Linked TVs.</p>` : ""}<p class="dim" style="font-size:.85rem">A pop-up appears here when someone finishes a film on one of your TVs.${perm === "granted" ? " Phone alerts also show while this page is open in the background." : ""} Nothing is sent when the page is closed.</p>`;
+  if (!list.length) return `<div class="card"><b>No notifications</b><p class="dim">When a film is watched to the end on one of your TVs, it shows up here.</p></div>${ask}${hint}`;
+  return `${ask}<div class="btns" style="justify-content:space-between;margin:0 0 .6rem"><span class="dim">${list.length} notification${list.length === 1 ? "" : "s"}</span><button class="btn ghost" data-act="clear-all-notes">Clear all</button></div>
+    <div class="card">${list.map(n => `<div class="row"><div style="font-size:1.4rem">✅</div><div class="grow"><b>${esc(noteText(n))}</b>
+      <div class="sub">${esc(noteTv(n))} · ${ago(n.at)}</div></div><button class="btn ghost" data-act="clear-note" data-id="${esc(n.id)}" data-sp="${esc(n.space)}">Clear</button></div>`).join("")}</div>${hint}`;
+}
+function popupsHtml() {
+  return S.popups.length ? `<div class="popups">${S.popups.map((n, i) => `<div class="popup"><div style="font-size:1.4rem">✅</div><div class="grow"><b>${esc(noteText(n))}</b><div class="sub dim">${esc(noteTv(n))}</div></div><button data-act="dismiss-popup" data-i="${i}" aria-label="Dismiss">✕</button></div>`).join("")}</div>` : "";
+}
 function hiddenView() {
   const hs = hiddenSet(), items = allItems();
   const top = items.filter(i => hs.has(i.id));
@@ -535,12 +573,12 @@ function attentionView() {
     <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
     <div class="grow"><b>${esc(disp(it).title)}</b><div>${why.map(w => `<span class="chip bad">${esc(w)}</span>`).join("")}</div><div class="sub">${esc(it.fileName || it.searchTitle || "")}</div></div></div>`).join("")}</div>` : "";
   const oldHtml = old.length ? `<h3>Still want these? <span class="dim">${old.length}</span></h3>
-    <p class="dim">These have been in your Drive for more than ${STALE_DAYS} days. Keep the ones you still want. Hide or delete the rest.</p>
+    <p class="dim">These have been in your Drive for more than ${STALE_DAYS} days. Keep the ones you still want. Delete the rest.</p>
     <div class="card">${old.map(({ it, at }) => `<div class="row">
       <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
       <div class="grow"><b>${esc(disp(it).title)}</b> <span class="dim">${esc(disp(it).year || "")}${it.kind === "series" ? " · series" : ""}</span>
         <div class="sub">Added ${Math.floor((Date.now() - at) / 86400000)} days ago${seen(it) ? " · watched" : ""}</div>
-        <div class="actions"><button class="btn gold" data-act="keep-item" data-id="${esc(it.id)}">Keep</button><button class="btn ghost" data-act="hide-one" data-id="${esc(it.id)}">Hide</button>${DELETE_ENABLED ? `<button class="btn ghost" data-act="delete-one" data-id="${esc(it.id)}">Delete</button>` : ""}</div></div></div>`).join("")}</div>
+        <div class="actions"><button class="btn gold" data-act="keep-item" data-id="${esc(it.id)}">Keep</button><button class="btn ${DELETE_ENABLED ? "red" : "ghost"}" data-act="${DELETE_ENABLED ? "delete-one" : "delete-soon"}" data-id="${esc(it.id)}">Delete${DELETE_ENABLED ? "" : " · coming soon"}</button></div></div></div>`).join("")}</div>
     <div class="btns" style="justify-content:flex-start"><button class="btn ghost" data-act="keep-all">Keep all of these</button></div>` : "";
   return fix + oldHtml;
 }
@@ -567,8 +605,8 @@ function settingsView() {
 function tvsView() {
   const own = S.user.uid, groups = [own, ...S.joined.map(j => j.owner)];
   const row = d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
-      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")}${d.appVersion ? " · v" + esc(d.appVersion) : ""} · ID ${esc(d.id.slice(-4))}</div>
-      <div class="actions"><button class="btn gold" data-act="refresh-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">↻ Sync library</button><button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Rename</button><button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Remove</button></div></div></div>`;
+      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div style="margin-top:.35rem">${d.appVersion ? `<span class="chip ok">App v${esc(String(d.appVersion).replace(/-guest$/, ""))}</span>` : `<span class="chip warn">Version unknown</span>`}<span class="chip">${esc(d.kind === "guest" ? "Guest app" : "Home app")}</span><span class="chip">ID ${esc(d.id.slice(-4))}</span></div>
+      <div class="actions"><button class="btn ${d.muted ? "ghost" : ""}" data-act="mute-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">${d.muted ? "🔕 Muted" : "🔔 Alerts on"}</button><button class="btn gold" data-act="refresh-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">↻ Sync library</button><button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Rename</button><button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Remove</button></div></div></div>`;
   const list = groups.map(sp => {
     const devs = S.allDevs[sp] || [];
     if (sp === own && !devs.length && groups.length === 1) return "";
@@ -659,10 +697,10 @@ function render() {
       ${S.linkParam ? `<p class="dim">Sign in to link the TV that showed code <b>${esc(S.linkParam)}</b>.</p>` : ""}${CREDIT}</div>${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
     return;
   }
-  const views = { library: libraryView, series: seriesView, hidden: hiddenView, deleted: deletedView, attention: attentionView, settings: settingsView, tvs: tvsView };
-  const titles = { library: "Library", series: "Series", hidden: "Hidden", deleted: "Deleted", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
+  const views = { library: libraryView, series: seriesView, hidden: hiddenView, deleted: deletedView, notifications: notificationsView, attention: attentionView, settings: settingsView, tvs: tvsView };
+  const titles = { library: "Library", series: "Series", hidden: "Hidden", deleted: "Deleted", notifications: "Notifications", attention: "Needs attention", settings: "TV settings", tvs: "Linked TVs" };
   const scrollY = window.scrollY;
-  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${libStamp()}${views[S.view]()}${CREDIT}</main>${selbar()}${drawer()}${modalHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
+  root.innerHTML = `${topbar()}<main>${["library", "series"].includes(S.view) ? "" : `<h2 style="margin-top:0">${titles[S.view]}</h2>`}${tvPicker()}${libStamp()}${views[S.view]()}${CREDIT}</main>${selbar()}${drawer()}${modalHtml()}${popupsHtml()}${S.toast ? `<div class="toast">${esc(S.toast)}</div>` : ""}`;
   window.scrollTo(0, scrollY);
 }
 
@@ -804,11 +842,28 @@ const A = {
   },
   "remove-member": el => { const m = S.members.find(x => x.id === el.dataset.id); S.modal = { type: "confirm", title: "Remove this person?", body: `${esc(m?.name || m?.email || "They")} will no longer be able to manage your TVs.`, ok: "Remove",
     run: async () => { await deleteDoc(uidRef("members", el.dataset.id)); toast("Removed."); } }; render(); },
-  "leave-space": el => { const id = el.dataset.sp; S.modal = { type: "confirm", title: "Leave this space?", body: "You will stop managing their TVs. They can invite you again.", ok: "Leave",
-    run: async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); if ((S.space || S.user.uid) === id) setSpace(S.user.uid); toast("You left."); } }; render(); },
+  // Asked twice, like signing out, so one stray tap can't remove you from someone's TVs.
+  "leave-space": el => {
+    const id = el.dataset.sp, who = spaceName(id);
+    const leave = async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); if ((S.space || S.user.uid) === id) setSpace(S.user.uid); toast("You left."); };
+    S.modal = { type: "confirm", title: "Leave this space?", body: `You will stop managing ${esc(who)}. They can invite you again.`, ok: "Leave",
+      run: async () => { S.modal = { type: "confirm", title: "Are you sure?", body: `Last check: leave ${esc(who)} and stop managing these TVs?`, ok: "Yes, leave", run: leave }; render(); } };
+    render();
+  },
   scan: () => openScanner(),
+  "delete-soon": () => toast("Deleting from Google Drive is coming soon. For now, delete it in Drive yourself, or press Keep."),
   "keep-item": async el => { await merge(uidRef("data", "overrides"), { reviewed: arrayUnion(el.dataset.id) }); toast("Kept. You won't be asked about it again."); },
   "keep-all": async () => { const ids = stale().map(x => x.it.id); if (!ids.length) return; await merge(uidRef("data", "overrides"), { reviewed: arrayUnion(...ids) }); toast("Kept. You won't be asked about these again."); },
+  "mute-tv": async el => {
+    const d = allDevices().find(x => x.id === el.dataset.id && x.space === el.dataset.sp); if (!d) return;
+    await merge(doc(db, "users", d.space, "devices", d.id), { muted: !d.muted });
+    toast(!d.muted ? `${d.name || "This TV"} is muted. Its "watched completely" notifications are hidden.` : `${d.name || "This TV"} will notify you again.`);
+  },
+  "clear-note": async el => { await deleteDoc(doc(db, "users", el.dataset.sp, "notifications", el.dataset.id)); },
+  "clear-all-notes": () => { const list = allNotes(); S.modal = { type: "confirm", title: "Clear all notifications?", body: `${list.length} notification${list.length === 1 ? "" : "s"} will be removed.`, ok: "Clear all",
+    run: async () => { await Promise.all(list.map(n => deleteDoc(doc(db, "users", n.space, "notifications", n.id)).catch(() => {}))); toast("Cleared."); } }; render(); },
+  "dismiss-popup": el => { S.popups.splice(+el.dataset.i, 1); render(); },
+  "allow-alerts": async () => { try { const r = await Notification.requestPermission(); toast(r === "granted" ? "Alerts allowed." : "Alerts were not allowed."); } catch (e) { toast("This browser can't show alerts."); } render(); },
   "pick-tv": el => {
     const id = el.dataset.id, sp = el.dataset.sp || S.user.uid;
     try { localStorage.setItem("pr_tv", id); } catch (e) {}
@@ -864,7 +919,7 @@ if (configured) {
         const code = S.linkParam.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         getDoc(doc(db, "links", code)).then(s => { if (s.exists() && !s.data().claimedBy) { S.modal = { type: "link", code, name: s.data().deviceName }; render(); } }).catch(() => {});
       }
-    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.joined = []; S.members = []; S.allDevs = {}; S.space = null; S.view = "library"; }
+    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.joined = []; S.members = []; S.allDevs = {}; S.notesBy = {}; S.popups = []; S.space = null; S.view = "library"; }
     render();
   });
 }
