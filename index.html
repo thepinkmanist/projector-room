@@ -126,7 +126,7 @@ const CREDIT = `<p class="credit">Film and series details and posters: This prod
 
 const S = {
   user: null, ready: false,
-  space: null, joined: [], members: [], chunks: {}, overrides: {}, settings: null, status: null, devices: [],
+  space: null, joined: [], members: [], allDevs: {}, chunks: {}, overrides: {}, settings: null, status: null, devices: [],
   view: "library", seriesId: null, selecting: false, sel: new Set(),
   q: "", sort: "new", filter: "all", group: true, drawer: false, pending: {}, modal: null, toast: null,
   linkParam: new URLSearchParams(location.search).get("link"),
@@ -191,7 +191,7 @@ const seen = it => isW(it.id) || tvDone(it);
 const seenMs = d => d.lastSeen?.toMillis ? d.lastSeen.toMillis() : 0;
 const isOnline = d => Date.now() - seenMs(d) < 75000;
 const statusHtml = d => isOnline(d) ? `<span class="on">● Online</span>` : `<span class="off">○ Offline · last seen ${ago(d.lastSeen)}</span>`;
-function tickStatus() { document.querySelectorAll("[data-ls]").forEach(el => { const d = S.devices.find(x => x.id === el.dataset.ls); if (d) el.innerHTML = statusHtml(d); }); }
+function tickStatus() { document.querySelectorAll("[data-ls]").forEach(el => { const d = allDevices().find(x => x.id === el.dataset.ls); if (d) el.innerHTML = statusHtml(d); }); }
 setInterval(tickStatus, 20000);
 const visibleEps = it => (it.episodes || []).filter(e => !hiddenSet().has(e.id));
 function toast(msg) { S.toast = msg; render(); clearTimeout(toastTimer); toastTimer = setTimeout(() => { S.toast = null; render(); }, 4000); }
@@ -257,10 +257,22 @@ function confirmDelete(ids) {
 }
 
 // ---------- settings and refresh are kept per TV ----------
-let watchedTv = null, tvUnsubs = [], spaceUnsubs = [];
+let watchedTv = null, tvUnsubs = [], spaceUnsubs = [], devUnsubs = [];
+const allDevices = () => Object.values(S.allDevs).flat();
+function startAllDeviceWatchers() {
+  devUnsubs.forEach(u => u()); devUnsubs = [];
+  if (!S.user) return;
+  const spaces = [S.user.uid, ...S.joined.map(j => j.owner)];
+  S.allDevs = Object.fromEntries(Object.entries(S.allDevs).filter(([k]) => spaces.includes(k)));
+  for (const sp of spaces) {
+    devUnsubs.push(onSnapshot(collection(db, "users", sp, "devices"),
+      s => { S.allDevs[sp] = s.docs.map(d => ({ id: d.id, space: sp, ...d.data() })); render(); },
+      err => { if (err.code === "permission-denied" && sp !== S.user.uid) deleteDoc(ownRef("joined", sp)).catch(() => {}); }));
+  }
+}
 function startSpaceWatchers() {
   spaceUnsubs.forEach(u => u()); spaceUnsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null;
-  Object.assign(S, { chunks: {}, overrides: {}, devices: [], members: [], settings: null, status: null });
+  Object.assign(S, { chunks: {}, overrides: {}, devices: [], settings: null, status: null });
   if (!S.user) return;
   const space = S.space || S.user.uid;
   const denied = err => {
@@ -273,10 +285,9 @@ function startSpaceWatchers() {
   w(collection(db, "users", space, "library"), s => { S.chunks = {}; s.forEach(d => S.chunks[d.id] = d.data()); render(); });
   w(doc(db, "users", space, "data", "overrides"), d => { S.overrides = d.exists() ? d.data() : {}; render(); });
   w(collection(db, "users", space, "devices"), s => { S.devices = s.docs.map(d => ({ id: d.id, ...d.data() })); watchTv(); render(); });
-  if (space === S.user.uid) w(collection(db, "users", space, "members"), s => { S.members = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); });
 }
-function setSpace(id) {
-  S.space = id; S.tv = null; S.view = "library"; S.selecting = false; S.sel.clear(); S.drawer = false; S.pending = {};
+function setSpace(id, tvId, keepView) {
+  S.space = id; S.tv = tvId || null; if (!keepView) S.view = "library"; S.selecting = false; S.sel.clear(); S.drawer = false; S.pending = {};
   try { localStorage.setItem("pr_space", id); } catch (e) {}
   startSpaceWatchers(); render();
 }
@@ -379,9 +390,10 @@ function topbar() {
     <button class="avatar-btn" data-act="nav" data-v="tvs" aria-label="Linked TVs">${S.user.photoURL ? `<img class="avatar" src="${esc(S.user.photoURL)}" alt="">` : `<span class="avatar">${esc((S.user.displayName || S.user.email || "?")[0].toUpperCase())}</span>`}</button></div>`;
 }
 function tvPicker() {
-  if (S.devices.length < 2 || !["library", "hidden", "attention", "settings"].includes(S.view)) return "";
-  const cur = curTv();
-  return `<div class="tvpick">${S.devices.map(d => `<button class="btn ${d.id === cur ? "gold" : "ghost"}" data-act="pick-tv" data-id="${esc(d.id)}"><span class="dot ${isOnline(d) ? "on" : "off"}">●</span> ${esc(d.name || "TV")}</button>`).join("")}</div>`;
+  const all = allDevices();
+  if (all.length < 2 || !["library", "hidden", "attention", "settings"].includes(S.view)) return "";
+  const cur = curTv(), sp = S.space || S.user.uid;
+  return `<div class="tvpick">${all.map(d => `<button class="btn ${d.id === cur && d.space === sp ? "gold" : "ghost"}" data-act="pick-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}"><span class="dot ${isOnline(d) ? "on" : "off"}">●</span> ${esc(d.name || "TV")}${d.space !== S.user.uid ? ` <span class="dim">· ${esc(spaceName(d.space))}</span>` : ""}</button>`).join("")}</div>`;
 }
 const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
 const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -392,7 +404,6 @@ function drawer() {
   const nav = (v, ico, label, n) => `<button class="nav ${S.view === v || (v === "library" && S.view === "series") ? "on" : ""}" data-act="nav" data-v="${v}">${ico} ${label}${n ? `<span class="n">${n}</span>` : ""}</button>`;
   return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
     <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
-    ${S.joined.length ? `<div class="spaces">${[S.user.uid, ...S.joined.map(j => j.owner)].map(id => `<button class="nav ${(S.space || S.user.uid) === id ? "on" : ""}" data-act="space" data-id="${esc(id)}">👥 ${esc(spaceName(id))}</button>`).join("")}</div>` : ""}
     ${nav("library", "🎬", "Library")}${nav("hidden", "🙈", "Hidden", nHid)}${nav("deleted", "🗑️", "Deleted", Object.keys(S.overrides.deleted || {}).length)}${nav("attention", "⚠️", "Needs attention", nAtt)}
     ${nav("settings", "⚙️", "TV settings")}${nav("tvs", "📺", "Linked TVs")}
     ${installable() ? `<button class="nav" data-act="install">📲 Install app</button>` : ""}
@@ -528,14 +539,21 @@ function settingsView() {
     <div class="syncbar">${chip}<span style="flex:1"></span><button class="btn gold" data-act="sync" ${pend ? "" : "disabled"}>Sync to TV</button></div>`;
 }
 function tvsView() {
+  const own = S.user.uid, groups = [own, ...S.joined.map(j => j.owner)];
+  const row = d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
+      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")}${d.appVersion ? " · v" + esc(d.appVersion) : ""} · ID ${esc(d.id.slice(-4))}</div></div>
+      <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}" data-sp="${esc(d.space)}">Remove</button></div>`;
+  const list = groups.map(sp => {
+    const devs = S.allDevs[sp] || [];
+    if (sp === own && !devs.length && groups.length === 1) return "";
+    return `<h3>${esc(spaceName(sp))}${sp !== own ? ` <button class="btn ghost" style="margin-left:.5rem;padding:.25rem .7rem;font-size:.8rem" data-act="leave-space" data-sp="${esc(sp)}">Leave</button>` : ""}</h3>
+      ${devs.length ? `<div class="card">${devs.map(row).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}`;
+  }).join("");
   return `<div class="card"><b>Link a TV</b><p class="dim">On the TV: <b>Settings → Projector Room</b> shows a code. Type it here, or scan the TV's QR code.</p>
     <div class="tools"><input class="txt" id="code" placeholder="ABCD-EFGH" maxlength="9" value="${esc(fmtCode(S.linkParam))}" autocapitalize="characters" autocomplete="off" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px">
     <button class="btn gold" data-act="link">Link</button><button class="btn" data-act="scan">📷 Scan QR</button></div></div>
-    ${ownSpace() ? "" : `<div class="card"><b>You are managing ${esc(spaceName(S.space))}</b><p class="dim">You can manage their TVs here. To link a TV of your own, switch back to <b>Your TVs</b> in the menu first.</p><button class="btn ghost" data-act="leave-space">Leave this space</button></div>`}
-    <h3>${esc(spaceName(S.space || S.user.uid))}</h3>${S.devices.length ? `<div class="card">${S.devices.map(d => `<div class="row"><div class="grow"><b>${esc(d.name || "TV")}</b>
-      <div class="sub"><span data-ls="${esc(d.id)}">${statusHtml(d)}</span></div><div class="sub">${esc(d.kind === "guest" ? "Guest app" : "Home app")}${d.appVersion ? " · v" + esc(d.appVersion) : ""} · ID ${esc(d.id.slice(-4))}</div></div>
-      <button class="btn ghost" data-act="rename-tv" data-id="${esc(d.id)}">Rename</button> <button class="btn ghost" data-act="remove-tv" data-id="${esc(d.id)}">Remove</button></div>`).join("")}</div>` : `<p class="dim">No TVs linked yet.</p>`}
-    ${ownSpace() ? shareBlock() : ""}
+    <h3 style="display:none"></h3>${list || `<p class="dim">No TVs linked yet.</p>`}
+    ${shareBlock()}
     <div class="card" style="margin-top:1rem"><b>Join someone's TVs</b><p class="dim">Got an invite code from another person? Type it here to manage their TVs with your own Google sign-in.</p>
     <div class="tools"><input class="txt" id="joincode" placeholder="ABCD-EFGH" autocapitalize="characters" autocomplete="off" maxlength="9" style="text-transform:uppercase;letter-spacing:.1em;min-width:160px"><button class="btn gold" data-act="join">Join</button></div></div>`;
 }
@@ -741,19 +759,24 @@ const A = {
   },
   "remove-member": el => { const m = S.members.find(x => x.id === el.dataset.id); S.modal = { type: "confirm", title: "Remove this person?", body: `${esc(m?.name || m?.email || "They")} will no longer be able to manage your TVs.`, ok: "Remove",
     run: async () => { await deleteDoc(uidRef("members", el.dataset.id)); toast("Removed."); } }; render(); },
-  "leave-space": () => { const id = S.space; S.modal = { type: "confirm", title: "Leave this space?", body: "You will stop managing their TVs. They can invite you again.", ok: "Leave",
-    run: async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); setSpace(S.user.uid); toast("You left."); } }; render(); },
+  "leave-space": el => { const id = el.dataset.sp; S.modal = { type: "confirm", title: "Leave this space?", body: "You will stop managing their TVs. They can invite you again.", ok: "Leave",
+    run: async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); if ((S.space || S.user.uid) === id) setSpace(S.user.uid); toast("You left."); } }; render(); },
   scan: () => openScanner(),
-  "pick-tv": el => { S.tv = el.dataset.id; watchTv(); try { localStorage.setItem("pr_tv", S.tv); } catch (e) {} S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0); },
-  "rename-tv": el => { const d = S.devices.find(x => x.id === el.dataset.id); S.modal = { type: "tvname", id: el.dataset.id, value: d?.name || "" }; render(); },
-  "tvname-save": async () => { const id = S.modal.id, v = document.getElementById("tn").value.trim(); if (!v) return; await merge(uidRef("devices", id), { name: v }); closeModal(); toast("Renamed."); },
+  "pick-tv": el => {
+    const id = el.dataset.id, sp = el.dataset.sp || S.user.uid;
+    try { localStorage.setItem("pr_tv", id); } catch (e) {}
+    if (sp !== (S.space || S.user.uid)) { setSpace(sp, id, true); window.scrollTo(0, 0); return; }
+    S.tv = id; watchTv(); S.selecting = false; S.sel.clear(); render(); window.scrollTo(0, 0);
+  },
+  "rename-tv": el => { const d = allDevices().find(x => x.id === el.dataset.id && x.space === el.dataset.sp); S.modal = { type: "tvname", id: el.dataset.id, sp: el.dataset.sp, value: d?.name || "" }; render(); },
+  "tvname-save": async () => { const m = S.modal, v = document.getElementById("tn").value.trim(); if (!v) return; await merge(doc(db, "users", m.sp, "devices", m.id), { name: v }); closeModal(); toast("Renamed."); },
   install: async () => {
     S.drawer = false;
     if (S.installEvt) { const e = S.installEvt; S.installEvt = null; e.prompt(); await e.userChoice.catch(() => {}); render(); return; }
     S.modal = { type: "confirm", title: "Add to Home Screen", body: "In Safari, tap the <b>Share</b> button, then <b>Add to Home Screen</b>.", ok: "Got it", run: async () => {} }; render();
   },
   "remove-tv": el => { S.modal = { type: "confirm", title: "Remove this TV?", body: "It stops syncing. You can link it again with a new code.", ok: "Remove",
-    run: async () => { await deleteDoc(uidRef("devices", el.dataset.id)); toast("Removed."); } }; render(); },
+    run: async () => { await deleteDoc(doc(db, "users", el.dataset.sp, "devices", el.dataset.id)); toast("Removed."); } }; render(); },
 };
 document.addEventListener("click", e => { const el = e.target.closest("[data-act]"); if (!el || el.tagName === "SELECT" || el.type === "checkbox" && el.dataset.act === "set") return; const f = A[el.dataset.act]; if (f) Promise.resolve(f(el, e)).catch(err => toast("Something went wrong: " + (err.message || err))); });
 document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort" || el.id === "filter" || el.id === "grp") { if (el.id === "sort") S.sort = el.value; else if (el.id === "filter") S.filter = el.value; else S.group = el.checked; savePrefs(); document.getElementById("gridbox").innerHTML = gridHtml(); } });
@@ -781,18 +804,19 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
 if (configured) {
   const app = initializeApp(FIREBASE_CONFIG); auth = getAuth(app); db = getFirestore(app);
   onAuthStateChanged(auth, user => {
-    unsubs.forEach(u => u()); unsubs = []; spaceUnsubs.forEach(u => u()); spaceUnsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null; S.user = user; S.ready = true;
+    unsubs.forEach(u => u()); unsubs = []; devUnsubs.forEach(u => u()); devUnsubs = []; spaceUnsubs.forEach(u => u()); spaceUnsubs = []; tvUnsubs.forEach(u => u()); tvUnsubs = []; watchedTv = null; S.user = user; S.ready = true;
     if (user) {
       if (history.state?.pr !== 1) history.pushState({ pr: 1 }, "");
       let saved = null; try { saved = localStorage.getItem("pr_space"); } catch (e) {}
       S.space = saved || user.uid;
-      unsubs.push(onSnapshot(collection(db, "users", user.uid, "joined"), s => { S.joined = s.docs.map(d => ({ owner: d.id, ...d.data() })); render(); }, err => console.warn("listen", err.code)));
+      unsubs.push(onSnapshot(collection(db, "users", user.uid, "joined"), s => { S.joined = s.docs.map(d => ({ owner: d.id, ...d.data() })); startAllDeviceWatchers(); render(); }, err => console.warn("listen", err.code)));
+      unsubs.push(onSnapshot(collection(db, "users", user.uid, "members"), s => { S.members = s.docs.map(d => ({ id: d.id, ...d.data() })); render(); }, err => console.warn("listen", err.code)));
       startSpaceWatchers();
       if (S.linkParam) {
         const code = S.linkParam.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
         getDoc(doc(db, "links", code)).then(s => { if (s.exists() && !s.data().claimedBy) { S.modal = { type: "link", code, name: s.data().deviceName }; render(); } }).catch(() => {});
       }
-    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.joined = []; S.members = []; S.space = null; S.view = "library"; }
+    } else { S.chunks = {}; S.overrides = {}; S.settings = null; S.status = null; S.devices = []; S.joined = []; S.members = []; S.allDevs = {}; S.space = null; S.view = "library"; }
     render();
   });
 }
