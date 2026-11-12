@@ -400,7 +400,7 @@ const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.
 const installable = () => !standalone() && (S.installEvt || isIos());
 function drawer() {
   if (!S.drawer) return "";
-  const hs = hiddenSet(), nAtt = attention().length, nHid = hs.size;
+  const hs = hiddenSet(), nAtt = attention().length + stale().length, nHid = hs.size;
   const nav = (v, ico, label, n) => `<button class="nav ${S.view === v || (v === "library" && S.view === "series") ? "on" : ""}" data-act="nav" data-v="${v}">${ico} ${label}${n ? `<span class="n">${n}</span>` : ""}</button>`;
   return `<div class="drawer-bg" data-act="drawer"></div><div class="drawer">
     <div class="who"><b>${esc(S.user.displayName || "")}</b><br><span class="dim">${esc(S.user.email)}</span></div>
@@ -511,12 +511,27 @@ function attention() {
   }
   return out;
 }
+// Files that have sat in the library a long time: ask whether they are still wanted.
+const STALE_DAYS = 100;
+function stale() {
+  const hs = hiddenSet(), rv = new Set(S.overrides.reviewed || []), limit = Date.now() - STALE_DAYS * 86400000;
+  return allItems().filter(i => !hs.has(i.id) && !rv.has(i.id)).map(i => ({ it: i, at: Date.parse(i.added) })).filter(x => x.at && x.at < limit).sort((a, b) => a.at - b.at);
+}
 function attentionView() {
-  const list = attention();
-  if (!list.length) return `<div class="card"><b>All good ✓</b><p class="dim">Every film and series has a match and a poster.</p></div>`;
-  return `<p class="dim">Tap one to fix it.</p><div class="card">${list.map(({ it, why }) => `<div class="row" data-act="tile" data-id="${esc(it.id)}" style="cursor:pointer">
+  const list = attention(), old = stale();
+  if (!list.length && !old.length) return `<div class="card"><b>All good ✓</b><p class="dim">Every film and series has a match and a poster, and nothing has been sitting for over ${STALE_DAYS} days.</p></div>`;
+  const fix = list.length ? `<p class="dim">Tap one to fix it.</p><div class="card">${list.map(({ it, why }) => `<div class="row" data-act="tile" data-id="${esc(it.id)}" style="cursor:pointer">
     <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
-    <div class="grow"><b>${esc(disp(it).title)}</b><div>${why.map(w => `<span class="chip bad">${esc(w)}</span>`).join("")}</div><div class="sub">${esc(it.fileName || it.searchTitle || "")}</div></div></div>`).join("")}</div>`;
+    <div class="grow"><b>${esc(disp(it).title)}</b><div>${why.map(w => `<span class="chip bad">${esc(w)}</span>`).join("")}</div><div class="sub">${esc(it.fileName || it.searchTitle || "")}</div></div></div>`).join("")}</div>` : "";
+  const oldHtml = old.length ? `<h3>Still want these? <span class="dim">${old.length}</span></h3>
+    <p class="dim">These have been in your Drive for more than ${STALE_DAYS} days. Keep the ones you still want. Hide or delete the rest.</p>
+    <div class="card">${old.map(({ it, at }) => `<div class="row">
+      <div class="poster" style="width:46px;flex:none">${disp(it).poster ? `<img src="${esc(disp(it).poster)}" alt="">` : `<div class="noposter">🎬</div>`}</div>
+      <div class="grow"><b>${esc(disp(it).title)}</b> <span class="dim">${esc(disp(it).year || "")}${it.kind === "series" ? " · series" : ""}</span>
+        <div class="sub">Added ${Math.floor((Date.now() - at) / 86400000)} days ago${seen(it) ? " · watched" : ""}</div>
+        <div class="actions"><button class="btn gold" data-act="keep-item" data-id="${esc(it.id)}">Keep</button><button class="btn ghost" data-act="hide-one" data-id="${esc(it.id)}">Hide</button>${DELETE_ENABLED ? `<button class="btn ghost" data-act="delete-one" data-id="${esc(it.id)}">Delete</button>` : ""}</div></div></div>`).join("")}</div>
+    <div class="btns" style="justify-content:flex-start"><button class="btn ghost" data-act="keep-all">Keep all of these</button></div>` : "";
+  return fix + oldHtml;
 }
 function curVal(k) {
   if (k in S.pending) return S.pending[k];
@@ -762,6 +777,8 @@ const A = {
   "leave-space": el => { const id = el.dataset.sp; S.modal = { type: "confirm", title: "Leave this space?", body: "You will stop managing their TVs. They can invite you again.", ok: "Leave",
     run: async () => { await deleteDoc(doc(db, "users", id, "members", S.user.uid)).catch(() => {}); await deleteDoc(ownRef("joined", id)).catch(() => {}); if ((S.space || S.user.uid) === id) setSpace(S.user.uid); toast("You left."); } }; render(); },
   scan: () => openScanner(),
+  "keep-item": async el => { await merge(uidRef("data", "overrides"), { reviewed: arrayUnion(el.dataset.id) }); toast("Kept. You won't be asked about it again."); },
+  "keep-all": async () => { const ids = stale().map(x => x.it.id); if (!ids.length) return; await merge(uidRef("data", "overrides"), { reviewed: arrayUnion(...ids) }); toast("Kept. You won't be asked about these again."); },
   "pick-tv": el => {
     const id = el.dataset.id, sp = el.dataset.sp || S.user.uid;
     try { localStorage.setItem("pr_tv", id); } catch (e) {}
