@@ -606,15 +606,18 @@ function modalHtml() {
   } else if (m.type === "refetch") {
     const it = m.item;
     inner = `<h3>Refetch details</h3><p class="dim">Pick the right ${it.kind === "series" ? "series" : "film"}. The TV then shows its poster, name and story.</p>
-      <div class="tabs"><button class="btn ${m.tab === "pick" ? "on" : ""}" data-act="rf-tab" data-t="pick">Pick a match</button><button class="btn ${m.tab === "paste" ? "on" : ""}" data-act="rf-tab" data-t="paste">Paste a TMDB link</button></div>`;
+      <div class="tabs"><button class="btn ${m.tab === "pick" ? "on" : ""}" data-act="rf-tab" data-t="pick">Suggestions</button><button class="btn ${m.tab === "search" ? "on" : ""}" data-act="rf-tab" data-t="search">Search TMDB</button><button class="btn ${m.tab === "paste" ? "on" : ""}" data-act="rf-tab" data-t="paste">Paste a TMDB link</button></div>`;
     if (m.error) inner += `<p class="chip bad">${esc(m.error)}</p>`;
     if (m.tab === "pick") {
       inner += m.loading ? `<p class="dim">Searching…</p>` : (m.results || []).map((c, i) => candHtml(c, `data-act="rf-pick" data-i="${i}"`, m.chosen === i)).join("") || `<p class="dim">No results. Try pasting a TMDB link instead.</p>`;
+    } else if (m.tab === "search") {
+      inner += `<div class="tools"><input class="txt" id="rfq" style="flex:1;min-width:0" placeholder="Type the film or series name" autocomplete="off" value="${esc(m.q || "")}"><button class="btn gold" data-act="rf-search">Search</button></div>`
+        + (m.sloading ? `<p class="dim">Searching…</p>` : m.sresults ? (m.sresults.map((c, i) => candHtml(c, `data-act="rf-spick" data-i="${i}"`, m.schosen === i)).join("") || `<p class="dim">No results. Try different words, or paste a TMDB link.</p>`) : `<p class="dim">Search by name, for example "Piku", then pick the right one.</p>`);
     } else {
       inner += `<input class="txt" id="rflink" style="width:100%" placeholder="https://www.themoviedb.org/movie/12345-name" value="${esc(m.pasted || "")}">
         <div class="btns" style="margin-top:.5rem"><button class="btn" data-act="rf-lookup">Look up</button></div>${m.preview ? candHtml(m.preview, "", true) : ""}`;
     }
-    const pick = m.tab === "pick" ? (m.results || [])[m.chosen] : m.preview;
+    const pick = m.tab === "pick" ? (m.results || [])[m.chosen] : m.tab === "search" ? (m.sresults || [])[m.schosen] : m.preview;
     inner += `<div class="btns"><button class="btn ghost" data-act="modal-close">Cancel</button><button class="btn gold" data-act="rf-use" ${pick ? "" : "disabled"}>Use this</button></div>`;
   } else if (m.type === "delete") {
     inner = `<h3>Delete from Google Drive?</h3><div>${m.shown}</div>
@@ -693,6 +696,17 @@ const A = {
   refetch: el => openRefetch(find(el.dataset.id)),
   "reset-match": async el => { await resetMatch(el.dataset.id); closeModal(); toast("Back to automatic. The TV looks it up again."); },
   "rf-tab": el => { S.modal.tab = el.dataset.t; S.modal.error = null; render(); },
+  "rf-spick": el => { S.modal.schosen = +el.dataset.i; render(); },
+  "rf-search": async () => {
+    const m = S.modal, q = (document.getElementById("rfq")?.value || "").trim(); if (!m) return;
+    m.q = q; m.error = null;
+    if (!q) { m.error = "Type a name to search for."; return render(); }
+    m.sloading = true; m.sresults = null; render();
+    const type = m.item.kind === "series" ? "tv" : "movie";
+    try { const res = await tmdb("/search/" + type, { query: q }); m.sresults = (res.results || []).slice(0, 10).map(r => asMatch(r, type)); m.schosen = m.sresults.length ? 0 : null; }
+    catch (e) { m.error = "Couldn't search: " + e.message; m.sresults = []; }
+    m.sloading = false; if (S.modal === m) render();
+  },
   "rf-pick": el => { S.modal.chosen = +el.dataset.i; render(); },
   "rf-lookup": async () => {
     const m = S.modal, text = document.getElementById("rflink").value.trim(); m.pasted = text; m.error = null; m.preview = null;
@@ -703,7 +717,7 @@ const A = {
     try { m.preview = asMatch(await tmdb(`/${type}/${hit[2]}`), type); } catch (e) { m.error = "Couldn't find that on TMDB."; }
     render();
   },
-  "rf-use": async () => { const m = S.modal, pick = m.tab === "pick" ? m.results[m.chosen] : m.preview; if (!pick) return; await chooseMatch(m.item.id, pick); closeModal(); toast("Saved. The TV picks it up within a couple of minutes."); },
+  "rf-use": async () => { const m = S.modal, pick = m.tab === "pick" ? m.results[m.chosen] : m.tab === "search" ? (m.sresults || [])[m.schosen] : m.preview; if (!pick) return; await chooseMatch(m.item.id, pick); closeModal(); toast("Saved. The TV picks it up within a couple of minutes."); },
   "modal-ok": async () => { const m = S.modal; closeModal(); try { await m.run(); } catch (e) { toast("That didn't save: " + (e.message || e)); } },
   "modal-close": closeModal,
   "modal-bg": (el, e) => { if (e.target === el) closeModal(); },
@@ -797,6 +811,7 @@ const A = {
 };
 document.addEventListener("click", e => { const el = e.target.closest("[data-act]"); if (!el || el.tagName === "SELECT" || el.type === "checkbox" && el.dataset.act === "set") return; const f = A[el.dataset.act]; if (f) Promise.resolve(f(el, e)).catch(err => toast("Something went wrong: " + (err.message || err))); });
 document.addEventListener("change", e => { const el = e.target; if (el.dataset?.act === "set") A.set(el); if (el.id === "sort" || el.id === "filter" || el.id === "grp") { if (el.id === "sort") S.sort = el.value; else if (el.id === "filter") S.filter = el.value; else S.group = el.checked; savePrefs(); document.getElementById("gridbox").innerHTML = gridHtml(); } });
+document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "rfq") { e.preventDefault(); A["rf-search"](); } });
 document.addEventListener("input", e => { if (e.target.id === "code" || e.target.id === "joincode") { const f = fmtCode(e.target.value); if (e.target.value !== f) e.target.value = f; return; } if (e.target.id === "q") { S.q = e.target.value; document.getElementById("gridbox").innerHTML = gridHtml(); } });
 
 // ---------- back button, install, offline shell ----------
